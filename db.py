@@ -193,7 +193,7 @@ def list_barang(conn, format_sumber: str):
 
 
 def list_cabang(conn):
-    return [r[0] for r in conn.execute("SELECT cabang FROM cabang_master ORDER BY cabang")]
+    return [r[0] for r in conn.execute("SELECT cabang FROM cabang_master ORDER BY cabang").fetchall()]
 
 
 def list_pemindahan(
@@ -221,7 +221,7 @@ def list_pemindahan(
         f"""SELECT id, cabang, sku, nama_barang, tanggal_pindah, qty, sumber
             FROM pemindahan_barang {where_sql}
             ORDER BY tanggal_pindah DESC, id DESC LIMIT ? OFFSET ?""",
-        params,
+        tuple(params),
     ).fetchall()
 
 
@@ -237,7 +237,7 @@ def count_pemindahan(conn, cabang: str | None = None, search: str | None = None)
         params.extend([like, like])
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     row = conn.execute(
-        f"SELECT COUNT(*) FROM pemindahan_barang {where_sql}", params
+        f"SELECT COUNT(*) FROM pemindahan_barang {where_sql}", tuple(params)
     ).fetchone()
     return row[0] if row else 0
 
@@ -253,7 +253,7 @@ def delete_pemindahan_batch(conn, id_list: list[int]):
     if not id_list:
         return
     placeholders = ",".join("?" for _ in id_list)
-    conn.execute(f"DELETE FROM pemindahan_barang WHERE id IN ({placeholders})", id_list)
+    conn.execute(f"DELETE FROM pemindahan_barang WHERE id IN ({placeholders})", tuple(id_list))
 
 
 def update_pemindahan(conn, id_: int, tanggal_pindah: str, qty: float):
