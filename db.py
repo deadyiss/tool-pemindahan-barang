@@ -55,6 +55,37 @@ SCHEMA_STATEMENTS = [
         konteks TEXT NOT NULL,
         waktu_import TEXT NOT NULL
     )""",
+    # Riwayat LENGKAP status jenis barang (PKP / Non-PKP / Keduanya). Setiap
+    # perubahan jadi baris baru (bukan ditimpa) -- status SAAT INI = baris
+    # dengan waktu_ubah terbaru untuk kombinasi format_sumber+sku itu.
+    """CREATE TABLE IF NOT EXISTS jenis_barang_riwayat (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        format_sumber TEXT NOT NULL,
+        sku TEXT NOT NULL,
+        jenis TEXT NOT NULL,
+        sumber TEXT NOT NULL,
+        waktu_ubah TEXT NOT NULL
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_jenis_barang_lookup
+        ON jenis_barang_riwayat (format_sumber, sku, waktu_ubah)""",
+    # Histori setiap kali barang dicek (lewat upload file ATAU cek manual).
+    # UNIQUE per (cabang, sku, tanggal): cek ulang untuk kombinasi yang sama
+    # akan MEMPERBARUI baris yang sudah ada, bukan menumpuk duplikat.
+    """CREATE TABLE IF NOT EXISTS penjualan_barang (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        format_sumber TEXT NOT NULL,
+        sku TEXT NOT NULL,
+        nama_barang TEXT NOT NULL,
+        cabang TEXT NOT NULL,
+        tanggal TEXT NOT NULL,
+        qty_terjual REAL NOT NULL,
+        sumber TEXT NOT NULL,
+        waktu_cek TEXT NOT NULL
+    )""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS uq_penjualan_dedup
+        ON penjualan_barang (cabang, sku, tanggal)""",
+    """CREATE INDEX IF NOT EXISTS idx_penjualan_cari
+        ON penjualan_barang (tanggal, nama_barang, cabang, sku)""",
 ]
 
 
@@ -82,10 +113,65 @@ def get_conn(db_path: str = DB_PATH):
         conn.close()
 
 
+def _migrasi_penjualan_barang_lama(conn):
+    """Migrasi satu-kali: versi lama tabel penjualan_barang punya kolom
+    valid/alasan/jenis_barang yang wajib diisi (NOT NULL). Kolom itu sudah
+    dibuang dari skema baru, tapi CREATE TABLE IF NOT EXISTS tidak mengubah
+    tabel yang sudah kepalang dibuat -- jadi INSERT versi baru (tanpa kolom
+    itu) gagal kena constraint lama. Migrasi ini deteksi skema lama, lalu
+    bongkar-pasang ulang tabelnya, memindahkan data yang masih kompatibel."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(penjualan_barang)").fetchall()]
+    if "valid" not in cols:
+        return  # sudah skema baru, tidak perlu migrasi
+    conn.execute("ALTER TABLE penjualan_barang RENAME TO penjualan_barang_lama")
+    conn.execute(
+        """CREATE TABLE penjualan_barang (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            format_sumber TEXT NOT NULL,
+            sku TEXT NOT NULL,
+            nama_barang TEXT NOT NULL,
+            cabang TEXT NOT NULL,
+            tanggal TEXT NOT NULL,
+            qty_terjual REAL NOT NULL,
+            sumber TEXT NOT NULL,
+            waktu_cek TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO penjualan_barang
+           (format_sumber, sku, nama_barang, cabang, tanggal, qty_terjual, sumber, waktu_cek)
+           SELECT format_sumber, sku, nama_barang, cabang, tanggal, qty_terjual, sumber, waktu_cek
+           FROM penjualan_barang_lama"""
+    )
+    conn.execute("DROP TABLE penjualan_barang_lama")
+    # Index lama ikut "menempel" ke tabel lama saat di-RENAME, jadi ikut hilang
+    # waktu tabel lama di-DROP -- perlu dibuat ulang di sini untuk tabel baru.
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_penjualan_dedup
+           ON penjualan_barang (cabang, sku, tanggal)"""
+    )
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_penjualan_cari
+           ON penjualan_barang (tanggal, nama_barang, cabang, sku)"""
+    )
+
+
+def _migrasi_tambah_jenis_ke_penjualan(conn):
+    """Migrasi satu-kali: tambah kolom jenis_barang ke penjualan_barang (skema
+    sempat membuang kolom ini, sekarang ditambah lagi -- kali ini nullable,
+    supaya baris LAMA yang sudah tercatat tanpa info jenis tetap valid, cuma
+    tampil 'Belum diklasifikasikan' untuk baris lama itu)."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(penjualan_barang)").fetchall()]
+    if "jenis_barang" not in cols:
+        conn.execute("ALTER TABLE penjualan_barang ADD COLUMN jenis_barang TEXT")
+
+
 def init_db(db_path: str = DB_PATH):
     with get_conn(db_path) as conn:
         for stmt in SCHEMA_STATEMENTS:
             conn.execute(stmt)
+        _migrasi_penjualan_barang_lama(conn)
+        _migrasi_tambah_jenis_ke_penjualan(conn)
 
 
 def upsert_cabang(conn, cabang: str, format_sumber: str):
@@ -121,35 +207,40 @@ def insert_pemindahan(
 ) -> int | None:
     """Insert 1 record pemindahan. Return id record kalau benar-benar disimpan,
     None kalau di-skip karena sudah ada record identik (cabang+sku+tanggal+qty)
-    -- lihat uq_pemindahan_dedup di SCHEMA."""
+    -- lihat uq_pemindahan_dedup di SCHEMA. Pakai INSERT...RETURNING (1 round-trip)
+    daripada INSERT lalu SELECT terpisah (2 round-trip) -- penting buat performa
+    karena tiap query ke Turso itu 1 kali lewat jaringan."""
     cur = conn.execute(
-        """INSERT OR IGNORE INTO pemindahan_barang
+        """INSERT INTO pemindahan_barang
            (format_sumber, sku, nama_barang, cabang, tanggal_pindah, qty, sumber, file_asal)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(cabang, sku, tanggal_pindah, qty) DO NOTHING
+           RETURNING id""",
         (format_sumber, sku, nama_barang, cabang, tanggal_pindah, qty, sumber, file_asal),
     )
-    if cur.rowcount <= 0:
-        return None
-    row = conn.execute(
-        """SELECT id FROM pemindahan_barang
-           WHERE cabang = ? AND sku = ? AND tanggal_pindah = ? AND qty = ?""",
-        (cabang, sku, tanggal_pindah, qty),
-    ).fetchone()
+    row = cur.fetchone()
     return row[0] if row else None
 
 
 def simpan_pemindahan_dari_parsed(conn, parsed, sumber: str, file_asal: str | None = None) -> list[int]:
-    """Helper terpusat: dari hasil parser.parse_file(), upsert cabang & barang_master,
-    lalu simpan tiap baris dengan qty_masuk > 0 sebagai record pemindahan (dedup
-    otomatis lewat insert_pemindahan). Dipakai oleh backfill.py, tab Backfill,
-    DAN tab Pengecekan Harian (auto-capture) -- satu logika, tiga pemakai.
-    Return: daftar id record BARU yang benar-benar tersimpan (bukan duplikat) --
-    dipakai buat bisa 'undo' (hapus lagi) kalau checkbox auto-capture dimatikan."""
+    """Helper terpusat: dari hasil parser.parse_file(), simpan tiap baris dengan
+    qty_masuk > 0 sebagai record pemindahan (dedup otomatis lewat insert_pemindahan).
+    Dipakai oleh backfill.py, tab Backfill, DAN tab Pengecekan Harian.
+
+    PENTING soal performa: cuma baris qty_masuk > 0 yang di-upsert ke barang_master
+    di sini (bukan SEMUA ~900 baris per file) -- karena tiap query ke Turso adalah
+    1 round-trip jaringan, upsert 900 baris/file itu yang bikin upload lambat
+    (bisa 10 menit/file). Konsekuensinya: barang yang TIDAK PERNAH punya Receive/
+    Masuk > 0 di file manapun tidak otomatis masuk katalog. Kalau butuh katalog
+    lengkap (semua barang, termasuk yang belum pernah masuk), pakai
+    sinkronkan_katalog_lengkap() secara terpisah (jalan sesekali, bukan tiap upload).
+
+    Return: daftar id record BARU yang benar-benar tersimpan (bukan duplikat)."""
     upsert_cabang(conn, parsed.cabang, parsed.format_sumber)
     id_baru = []
     for row in parsed.rows:
-        upsert_barang(conn, parsed.format_sumber, row.sku, row.nama_barang, row.category)
         if row.qty_masuk > 0:
+            upsert_barang(conn, parsed.format_sumber, row.sku, row.nama_barang, row.category)
             id_ = insert_pemindahan(
                 conn,
                 format_sumber=parsed.format_sumber,
@@ -164,6 +255,21 @@ def simpan_pemindahan_dari_parsed(conn, parsed, sumber: str, file_asal: str | No
             if id_ is not None:
                 id_baru.append(id_)
     return id_baru
+
+
+def sinkronkan_katalog_lengkap(conn, parsed) -> int:
+    """Upsert SEMUA baris (bukan cuma qty_masuk > 0) ke barang_master --
+    dipakai lewat tombol terpisah 'Sinkronkan Katalog Lengkap', dijalankan
+    sesekali kalau perlu katalog barang yang benar-benar lengkap (termasuk
+    barang yang belum pernah ada transaksi Receive-nya). TIDAK dipanggil
+    otomatis tiap upload harian karena lambat (lihat catatan performa di
+    simpan_pemindahan_dari_parsed)."""
+    upsert_cabang(conn, parsed.cabang, parsed.format_sumber)
+    n = 0
+    for row in parsed.rows:
+        upsert_barang(conn, parsed.format_sumber, row.sku, row.nama_barang, row.category)
+        n += 1
+    return n
 
 
 def cek_validitas(conn, cabang: str, sku: str, tanggal_minimal: str = "2026-08-01") -> bool:
@@ -329,3 +435,284 @@ def hapus_semua_pemindahan(conn):
     mau dibuang total dan diganti sumber lain yang lebih akurat (mis. hasil
     verifikasi manual ke Accurate) -- lihat PRD §11."""
     conn.execute("DELETE FROM pemindahan_barang")
+
+
+# ---------------------------------------------------------------------------
+# Jenis Barang: PKP / Non-PKP / Keduanya -- riwayat lengkap (bukan cuma status
+# terkini yang ditimpa).
+# ---------------------------------------------------------------------------
+JENIS_VALID = ("pkp", "nonpkp", "keduanya")
+
+
+def set_jenis_barang(conn, format_sumber: str, sku: str, jenis: str, sumber: str):
+    """Catat perubahan jenis barang sebagai baris RIWAYAT baru (bukan update di
+    tempat) -- supaya histori lengkap kapan status berubah dari apa ke apa."""
+    import datetime
+
+    if jenis not in JENIS_VALID:
+        raise ValueError(f"jenis harus salah satu dari {JENIS_VALID}, dapat: {jenis!r}")
+    conn.execute(
+        """INSERT INTO jenis_barang_riwayat (format_sumber, sku, jenis, sumber, waktu_ubah)
+           VALUES (?, ?, ?, ?, ?)""",
+        (format_sumber, sku, jenis, sumber, datetime.datetime.now().isoformat(timespec="seconds")),
+    )
+
+
+def get_jenis_barang(conn, format_sumber: str, sku: str) -> str | None:
+    """Status jenis TERKINI (baris riwayat terbaru) untuk 1 barang. None kalau
+    belum pernah diklasifikasikan sama sekali."""
+    row = conn.execute(
+        """SELECT jenis FROM jenis_barang_riwayat
+           WHERE format_sumber = ? AND sku = ?
+           ORDER BY waktu_ubah DESC, id DESC LIMIT 1""",
+        (format_sumber, sku),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def list_riwayat_jenis_barang(conn, format_sumber: str, sku: str):
+    """Seluruh riwayat perubahan jenis untuk 1 barang, terbaru dulu."""
+    return conn.execute(
+        """SELECT jenis, sumber, waktu_ubah FROM jenis_barang_riwayat
+           WHERE format_sumber = ? AND sku = ?
+           ORDER BY waktu_ubah DESC, id DESC""",
+        (format_sumber, sku),
+    ).fetchall()
+
+
+def list_barang_dengan_jenis(
+    conn,
+    format_sumber: str | None = None,
+    filter_jenis: str | None = None,  # 'pkp' | 'nonpkp' | 'keduanya' | 'belum'
+    search: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Daftar barang di barang_master + status jenis TERKINI-nya (LEFT JOIN ke
+    baris riwayat terbaru per barang). filter_jenis='belum' artinya barang yang
+    sama sekali belum pernah diklasifikasikan."""
+    where = []
+    params: list = []
+    if format_sumber:
+        where.append("bm.format_sumber = ?")
+        params.append(format_sumber)
+    if search:
+        where.append("(bm.nama_barang LIKE ? OR bm.sku LIKE ?)")
+        like = f"%{search}%"
+        params.extend([like, like])
+    if filter_jenis == "belum":
+        where.append("terkini.jenis IS NULL")
+    elif filter_jenis in JENIS_VALID:
+        where.append("terkini.jenis = ?")
+        params.append(filter_jenis)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    params.extend([limit, offset])
+    sql = f"""
+        SELECT bm.format_sumber, bm.sku, bm.nama_barang, terkini.jenis
+        FROM barang_master bm
+        LEFT JOIN (
+            SELECT format_sumber, sku, jenis
+            FROM jenis_barang_riwayat jr
+            WHERE waktu_ubah = (
+                SELECT MAX(waktu_ubah) FROM jenis_barang_riwayat jr2
+                WHERE jr2.format_sumber = jr.format_sumber AND jr2.sku = jr.sku
+            )
+        ) terkini ON terkini.format_sumber = bm.format_sumber AND terkini.sku = bm.sku
+        {where_sql}
+        ORDER BY bm.nama_barang LIMIT ? OFFSET ?
+    """
+    return conn.execute(sql, tuple(params)).fetchall()
+
+
+def count_barang_dengan_jenis(
+    conn,
+    format_sumber: str | None = None,
+    filter_jenis: str | None = None,
+    search: str | None = None,
+) -> int:
+    where = []
+    params: list = []
+    if format_sumber:
+        where.append("bm.format_sumber = ?")
+        params.append(format_sumber)
+    if search:
+        where.append("(bm.nama_barang LIKE ? OR bm.sku LIKE ?)")
+        like = f"%{search}%"
+        params.extend([like, like])
+    if filter_jenis == "belum":
+        where.append("terkini.jenis IS NULL")
+    elif filter_jenis in JENIS_VALID:
+        where.append("terkini.jenis = ?")
+        params.append(filter_jenis)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    sql = f"""
+        SELECT COUNT(*)
+        FROM barang_master bm
+        LEFT JOIN (
+            SELECT format_sumber, sku, jenis
+            FROM jenis_barang_riwayat jr
+            WHERE waktu_ubah = (
+                SELECT MAX(waktu_ubah) FROM jenis_barang_riwayat jr2
+                WHERE jr2.format_sumber = jr.format_sumber AND jr2.sku = jr.sku
+            )
+        ) terkini ON terkini.format_sumber = bm.format_sumber AND terkini.sku = bm.sku
+        {where_sql}
+    """
+    row = conn.execute(sql, tuple(params)).fetchone()
+    return row[0] if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Validitas dengan detail alasan + status jenis barang (PKP/Non-PKP/Keduanya).
+# Aturan (dikonfirmasi client):
+#   - Non-PKP  -> SELALU tidak valid, apapun histori pemindahannya.
+#   - PKP / Keduanya / belum diklasifikasikan -> pakai aturan lama (pernah ada
+#     Receive/Masuk sejak tanggal_minimal ke cabang yang sama).
+# ---------------------------------------------------------------------------
+LABEL_JENIS = {
+    "pkp": "PKP",
+    "nonpkp": "Non-PKP",
+    "keduanya": "Keduanya",
+    None: "Belum diklasifikasikan",
+}
+
+
+def cek_validitas_detail(
+    conn, format_sumber: str, cabang: str, sku: str, tanggal_minimal: str = "2026-08-01"
+) -> tuple[bool, str, str]:
+    """Return (valid, alasan, label_jenis)."""
+    jenis = get_jenis_barang(conn, format_sumber, sku)
+    label = LABEL_JENIS.get(jenis, jenis)
+
+    if jenis == "nonpkp":
+        return False, "Barang Non-PKP -- tidak diinput terlepas dari histori pemindahan.", label
+
+    row = conn.execute(
+        """SELECT tanggal_pindah FROM pemindahan_barang
+           WHERE cabang = ? AND sku = ? AND tanggal_pindah >= ?
+           ORDER BY tanggal_pindah ASC LIMIT 1""",
+        (cabang, sku, tanggal_minimal),
+    ).fetchone()
+    if row:
+        return True, f"Ada catatan pemindahan barang ke cabang ini pada {row[0]}.", label
+    return False, "Barang tidak memiliki catatan pemindahan ke cabang ini sejak Agustus.", label
+
+
+# ---------------------------------------------------------------------------
+# Histori penjualan (hasil tiap pengecekan, dari upload file ATAU cek manual).
+# ---------------------------------------------------------------------------
+def simpan_penjualan(
+    conn,
+    format_sumber: str,
+    sku: str,
+    nama_barang: str,
+    cabang: str,
+    tanggal: str,
+    qty_terjual: float,
+    sumber: str,
+    jenis_barang: str | None = None,
+):
+    """Upsert 1 baris histori penjualan. Catatan apa yang terjual + label
+    JENIS BARANG SAAT ITU DICEK (snapshot terkunci -- lihat catatan di bawah).
+
+    Cek ulang untuk kombinasi cabang+sku+tanggal yang sama akan MEMPERBARUI
+    qty (bukan menumpuk duplikat). TAPI kolom jenis_barang SENGAJA TIDAK ikut
+    diperbarui saat konflik -- begitu sebuah baris pertama kali tercatat,
+    jenisnya terkunci selamanya sesuai kondisi saat itu, walau barangnya
+    diklasifikasikan ulang belakangan (mis. dari Non-PKP jadi PKP). Ini
+    keputusan desain yang disengaja, dikonfirmasi ke user."""
+    import datetime
+
+    conn.execute(
+        """INSERT INTO penjualan_barang
+           (format_sumber, sku, nama_barang, cabang, tanggal, qty_terjual, sumber, waktu_cek, jenis_barang)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(cabang, sku, tanggal) DO UPDATE SET
+               qty_terjual = excluded.qty_terjual,
+               sumber = excluded.sumber,
+               waktu_cek = excluded.waktu_cek""",
+        (
+            format_sumber, sku, nama_barang, cabang, tanggal, qty_terjual, sumber,
+            datetime.datetime.now().isoformat(timespec="seconds"), jenis_barang,
+        ),
+    )
+
+
+def search_penjualan(
+    conn,
+    cabang: str | None = None,
+    sku: str | None = None,
+    nama: str | None = None,
+    tanggal_dari: str | None = None,
+    tanggal_sampai: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    where = []
+    params: list = []
+    if cabang:
+        where.append("cabang = ?")
+        params.append(cabang)
+    if sku:
+        where.append("sku LIKE ?")
+        params.append(f"%{sku}%")
+    if nama:
+        where.append("nama_barang LIKE ?")
+        params.append(f"%{nama}%")
+    if tanggal_dari:
+        where.append("tanggal >= ?")
+        params.append(tanggal_dari)
+    if tanggal_sampai:
+        where.append("tanggal <= ?")
+        params.append(tanggal_sampai)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    params.extend([limit, offset])
+    return conn.execute(
+        f"""SELECT id, tanggal, cabang, sku, nama_barang, qty_terjual, sumber, jenis_barang
+            FROM penjualan_barang {where_sql}
+            ORDER BY tanggal DESC, id DESC LIMIT ? OFFSET ?""",
+        tuple(params),
+    ).fetchall()
+
+
+def update_penjualan(conn, id_: int, tanggal: str, qty_terjual: float):
+    conn.execute(
+        "UPDATE penjualan_barang SET tanggal = ?, qty_terjual = ? WHERE id = ?",
+        (tanggal, qty_terjual, id_),
+    )
+
+
+def delete_penjualan(conn, id_: int):
+    conn.execute("DELETE FROM penjualan_barang WHERE id = ?", (id_,))
+
+
+def count_penjualan(
+    conn,
+    cabang: str | None = None,
+    sku: str | None = None,
+    nama: str | None = None,
+    tanggal_dari: str | None = None,
+    tanggal_sampai: str | None = None,
+) -> int:
+    where = []
+    params: list = []
+    if cabang:
+        where.append("cabang = ?")
+        params.append(cabang)
+    if sku:
+        where.append("sku LIKE ?")
+        params.append(f"%{sku}%")
+    if nama:
+        where.append("nama_barang LIKE ?")
+        params.append(f"%{nama}%")
+    if tanggal_dari:
+        where.append("tanggal >= ?")
+        params.append(tanggal_dari)
+    if tanggal_sampai:
+        where.append("tanggal <= ?")
+        params.append(tanggal_sampai)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM penjualan_barang {where_sql}", tuple(params)
+    ).fetchone()
+    return row[0] if row else 0
