@@ -330,6 +330,44 @@ def simpan_pemindahan_dari_parsed(conn, parsed, sumber: str, file_asal: str | No
     return id_baru
 
 
+def simpan_penjualan_dari_parsed(conn, parsed, sumber: str, file_asal: str | None = None) -> int:
+    """Helper terpusat: dari hasil parser.parse_file(), simpan tiap baris dengan
+    qty_terjual > 0 sebagai record penjualan (upsert per cabang+sku+tanggal --
+    lihat simpan_penjualan() untuk detail perilaku konflik). Dipakai oleh tombol
+    'Simpan Penjualan' di tab Import Massal.
+
+    Sama seperti simpan_pemindahan_dari_parsed(): nama_barang/sku/category
+    tetap di-upsert ke barang_master untuk baris yang diproses di sini (baris
+    qty_terjual > 0) supaya nama barang & SKU-nya tetap lengkap di katalog,
+    walau baris itu tidak ikut ke-upsert lewat tombol 'Simpan Barang Masuk'.
+
+    Jenis barang (PKP/Non-PKP/Keduanya) ikut disertakan sebagai snapshot
+    status SAAT ini (kalau sudah pernah diklasifikasikan) -- perilaku sama
+    dengan pengecekan harian manual, lihat simpan_penjualan() untuk kenapa
+    snapshot ini tidak berubah lagi walau klasifikasinya diubah belakangan.
+
+    Return: jumlah baris yang diproses (tersimpan baru ATAU diperbarui)."""
+    upsert_cabang(conn, parsed.cabang, parsed.format_sumber)
+    n = 0
+    for row in parsed.rows:
+        if row.qty_terjual > 0:
+            upsert_barang(conn, parsed.format_sumber, row.sku, row.nama_barang, row.category)
+            jenis = get_jenis_barang(conn, parsed.format_sumber, row.sku)
+            simpan_penjualan(
+                conn,
+                format_sumber=parsed.format_sumber,
+                sku=row.sku,
+                nama_barang=row.nama_barang,
+                cabang=parsed.cabang,
+                tanggal=parsed.tanggal_awal,
+                qty_terjual=row.qty_terjual,
+                sumber=sumber,
+                jenis_barang=jenis,
+            )
+            n += 1
+    return n
+
+
 def sinkronkan_katalog_lengkap(conn, parsed) -> int:
     """Upsert SEMUA baris (bukan cuma qty_masuk > 0) ke barang_master --
     dipakai lewat tombol terpisah 'Sinkronkan Katalog Lengkap', dijalankan

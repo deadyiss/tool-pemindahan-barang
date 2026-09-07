@@ -651,14 +651,16 @@ with tab_backfill:
                 items.append((uf.name, uf.getbuffer()))
         return items
 
-    bcol1, bcol2 = st.columns(2)
+    bcol1, bcol2, bcol3 = st.columns(3)
     with bcol1:
-        jalankan_backfill = st.button("Jalankan Backfill (simpan pemindahan)")
+        jalankan_penjualan = st.button("Simpan Penjualan", width="stretch")
     with bcol2:
-        jalankan_sync = st.button("Sinkronkan Katalog Lengkap (semua barang, lebih lambat)")
-        st.caption("Jalankan sesekali saja -- perlu supaya dropdown barang & klasifikasi PKP/Non lebih lengkap.")
+        jalankan_pemindahan = st.button("Simpan Barang Masuk / Pemindahan", width="stretch")
+    with bcol3:
+        jalankan_katalog = st.button("Simpan Semua Nama Barang", width="stretch")
+        st.caption("Catat SEMUA barang di file (tanpa syarat qty > 0) ke katalog -- lebih lambat, jalankan sesekali saja.")
 
-    if uploaded_files and (jalankan_backfill or jalankan_sync):
+    if uploaded_files and (jalankan_penjualan or jalankan_pemindahan or jalankan_katalog):
         xlsx_items = _expand_uploads(uploaded_files)
         if not xlsx_items:
             st.warning("Tidak ada file .xlsx ditemukan.")
@@ -676,7 +678,7 @@ with tab_backfill:
                         tmp_path = tmp.name
                     try:
                         parsed = parse_file(tmp_path)
-                        if jalankan_backfill:
+                        if jalankan_pemindahan:
                             n_kandidat = sum(1 for r in parsed.rows if r.qty_masuk > 0)
                             id_baru = db.simpan_pemindahan_dari_parsed(conn, parsed, sumber="backfill_excel", file_asal=nama_file)
                             n_baru = len(id_baru)
@@ -686,7 +688,13 @@ with tab_backfill:
                                            n_baru=n_baru, n_duplikat=n_dup, konteks="backfill_tab")
                             n_rows += n_baru
                             n_dup_total += n_dup
-                        else:
+                        elif jalankan_penjualan:
+                            n_baru_pj = db.simpan_penjualan_dari_parsed(conn, parsed, sumber="backfill_excel", file_asal=nama_file)
+                            db.log_import(conn, nama_file=nama_file, cabang=parsed.cabang,
+                                           format_sumber=parsed.format_sumber, tanggal_data=parsed.tanggal_awal,
+                                           n_baru=n_baru_pj, n_duplikat=0, konteks="backfill_tab_penjualan")
+                            n_rows += n_baru_pj
+                        else:  # jalankan_katalog
                             n_rows += db.sinkronkan_katalog_lengkap(conn, parsed)
                         n_ok += 1
                     except Exception as e:
@@ -697,8 +705,10 @@ with tab_backfill:
                     progress.progress(i / len(xlsx_items))
                     status.text(f"{i}/{len(xlsx_items)} file diproses...")
 
-            if jalankan_backfill:
+            if jalankan_pemindahan:
                 st.success(f"Selesai. Sukses: {n_ok}, Gagal: {n_fail}. Record baru: {n_rows}, duplikat: {n_dup_total}")
+            elif jalankan_penjualan:
+                st.success(f"Selesai. Sukses: {n_ok}, Gagal: {n_fail}. Record penjualan tersimpan/diperbarui: {n_rows}")
             else:
                 st.success(f"Selesai. Sukses: {n_ok}, Gagal: {n_fail}. Baris katalog di-upsert: {n_rows}")
             if fail_log:
