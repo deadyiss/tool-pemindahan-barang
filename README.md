@@ -25,8 +25,7 @@ streamlit run app.py
 
 Tanpa konfigurasi tambahan, tool otomatis pakai file SQLite lokal
 (`pemindahan.db`) — cukup untuk development/testing di komputer sendiri.
-**Jangan pakai mode ini untuk deploy ke web** (lihat bagian "Kenapa Turso"
-di bawah).
+**Jangan pakai mode ini untuk deploy ke web** (lihat bagian deploy di bawah).
 
 ### Backfill awal (sekali di awal, atau tiap dapat file lama baru)
 
@@ -38,75 +37,87 @@ Atau lewat tab "Backfill (Import Massal)" di aplikasi web.
 
 ---
 
-## Deploy ke Web (Gratis) — Streamlit Community Cloud + Turso
+## Deploy ke Web (Tercepat, Gratis) — Google Cloud Run (Jakarta) + Neon Postgres (Singapore)
 
-### Kenapa butuh 2 layanan (bukan cuma 1)?
+**Ini opsi yang direkomendasikan** untuk pengguna di Indonesia — dua-duanya
+gratis, dua-duanya di region Asia (jauh lebih dekat dari Turso yang cuma ada
+di Tokyo/Mumbai), dan **tidak ada jeda "tidur 12 jam"** seperti Streamlit
+Community Cloud. Kalau app idle lama, Cloud Run tetap bisa scale-down, tapi
+"bangunnya" hitungan detik (bukan puluhan detik), dan database Neon bangun
+dalam <1 detik.
 
-Streamlit Community Cloud gratis untuk **menjalankan aplikasinya**, tapi
-storage lokalnya **tidak persisten** — dari dokumentasi resmi Streamlit:
-*"Community Cloud apps do not guarantee the persistence of local file
-storage, so the platform may delete data stored using this technique at any
-time."* Kalau database SQLite kita taruh sebagai file lokal di situ, **histori
-pemindahan bisa hilang tiba-tiba** kapan saja app-nya restart/redeploy — ini
-bukan risiko kecil, karena seluruh nilai tool ini ada di data historisnya.
+Opsi lama (Streamlit Community Cloud + Turso) masih didukung kodenya (lihat
+"Opsi Alternatif" di bawah) kalau kamu lebih suka cara yang lebih sederhana
+dan tidak keberatan dengan latensinya.
 
-Solusinya: pisahkan **penyimpanan data** ke **Turso** — database cloud
-gratis (SQLite-compatible, jadi hampir tidak perlu ubah kode) yang persisten
-selamanya, tidak terikat ke siklus hidup aplikasi.
+### Langkah 1 — Setup database di Neon
 
-**Konsekuensi yang perlu diterima:** app di Streamlit Community Cloud akan
-"tidur" kalau tidak ada yang mengakses selama 12 jam — begitu dibuka lagi,
-perlu klik "bangunkan" dan tunggu ~30 detik. **Datanya tetap aman** (tersimpan
-di Turso, bukan di app), cuma app-nya perlu di-restart manual. Ini trade-off
-yang sudah disepakati demi tetap 100% gratis.
-
-### Langkah 1 — Setup Turso
-
-1. Daftar di [turso.tech](https://turso.tech) (gratis, tidak perlu kartu kredit).
-2. Install Turso CLI, lalu buat database:
-   ```
-   turso db create pemindahan-barang
-   ```
-3. Ambil URL koneksi & token:
-   ```
-   turso db show pemindahan-barang --url
-   turso db tokens create pemindahan-barang
-   ```
-4. Catat dua nilai ini (`TURSO_DATABASE_URL` dan `TURSO_AUTH_TOKEN`) — dipakai di Langkah 3.
+1. Daftar di [neon.tech](https://neon.tech) (gratis, tidak perlu kartu kredit).
+2. Buat project baru. **Pilih region Singapore (AWS ap-southeast-1)** —
+   paling dekat dari Indonesia di antara pilihan yang ada.
+3. Dari dashboard project, salin **Connection string** (format
+   `postgresql://user:password@host/dbname?sslmode=require`). Ini nilai
+   `DATABASE_URL` yang dipakai di Langkah 3.
 
 ### Langkah 2 — Push kode ke GitHub
 
 1. Buat repo baru (boleh private) di GitHub.
-2. Push seluruh isi folder `app/` ke repo itu (`app.py`, `db.py`, `parser.py`,
-   `backfill.py`, `requirements.txt`).
-3. **Jangan** commit file `pemindahan.db` lokal kalau ada (tambahkan ke
-   `.gitignore`) — begitu Turso aktif, itu tidak dipakai lagi.
+2. Push seluruh isi folder `app/`, termasuk `Dockerfile` dan `.dockerignore`
+   yang baru ditambahkan.
+3. **Jangan** commit file `pemindahan.db` lokal kalau ada (sudah masuk
+   `.gitignore`).
 
-### Langkah 3 — Deploy di Streamlit Community Cloud
+### Langkah 3 — Deploy ke Cloud Run
 
-1. Buka [share.streamlit.io](https://share.streamlit.io), login pakai akun GitHub.
-2. "New app" → pilih repo yang baru dibuat, branch, dan `app.py` sebagai main file.
-3. Sebelum deploy, buka "Advanced settings" → "Secrets", isi:
+1. Daftar/login ke [Google Cloud Console](https://console.cloud.google.com),
+   aktifkan billing (tetap gratis selama masih dalam kuota Cloud Run —
+   kartu kredit cuma untuk verifikasi, bukan berarti otomatis kena biaya).
+2. Buka **Cloud Run** → "Create Service" → "Continuously deploy from a
+   repository" → hubungkan ke repo GitHub yang baru dibuat.
+3. **Region: pilih `asia-southeast2 (Jakarta)`.**
+4. Di bagian "Container, Volumes, Networking, Security" → tab "Variables &
+   Secrets", tambahkan environment variable:
+   ```
+   DATABASE_URL = postgresql://user:password@host/dbname?sslmode=require
+   ```
+   (dari Langkah 1). Boleh sekalian tambahkan `APP_USERNAME` / `APP_PASSWORD`
+   kalau mau override default.
+5. Authentication: pilih "Allow unauthenticated invocations" (supaya bisa
+   diakses lewat browser biasa — keamanan tetap dijaga lewat login form
+   di dalam app itu sendiri).
+6. Klik "Create". Tunggu beberapa menit, Cloud Run kasih URL publik
+   (`https://nama-app-xxxx.a.run.app`).
+7. Begitu app hidup, jalankan backfill Agustus pertama kali lewat tab
+   "Backfill" di app (upload file lewat browser).
+
+### Kalau app "kedinginan" (cold start)
+
+Beda dengan Streamlit Community Cloud yang "tidur" sampai 12 jam dan perlu
+diklik manual untuk bangun, Cloud Run otomatis bangun sendiri saat ada yang
+membuka link — cuma butuh beberapa detik ekstra di request pertama, tidak
+perlu tindakan apa pun dari pengguna.
+
+---
+
+## Opsi Alternatif (Lebih Sederhana, Lebih Lambat) — Streamlit Community Cloud + Turso
+
+Kalau tidak mau urus Docker/Cloud Run, cara lama ini masih didukung penuh
+oleh kode yang sama (`db.py` otomatis mendeteksi mana yang dipakai):
+
+1. Daftar di [turso.tech](https://turso.tech) (gratis), buat database:
+   `turso db create pemindahan-barang`
+2. Ambil kredensial:
+   `turso db show pemindahan-barang --url` dan
+   `turso db tokens create pemindahan-barang`
+3. Push kode (folder `app/`, tanpa `pemindahan.db`) ke GitHub.
+4. Di [share.streamlit.io](https://share.streamlit.io) → "New app" → pilih
+   repo & `app.py` → "Advanced settings" → "Secrets", isi:
    ```toml
    TURSO_DATABASE_URL = "libsql://nama-db-kamu.turso.io"
-   TURSO_AUTH_TOKEN = "isi-token-dari-langkah-1"
+   TURSO_AUTH_TOKEN = "isi-token-dari-langkah-2"
    ```
-   (Boleh sekalian tambahkan `APP_USERNAME` / `APP_PASSWORD` di sini kalau
-   mau override dari default `admin` / `ujangadmin`.)
-4. Klik "Deploy". Tunggu beberapa menit, app akan dapat URL publik
-   (`https://nama-app-kamu.streamlit.app`).
-5. Begitu app hidup, jalankan backfill Agustus pertama kali lewat tab
-   "Backfill" di app (upload file, bukan lewat CLI, karena CLI jalan di
-   komputer lokal sedangkan database sekarang ada di Turso — cukup pastikan
-   `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` juga diset sebagai environment
-   variable di komputer lokal kalau mau pakai `backfill.py` dari CLI
-   terhubung ke Turso yang sama).
-
-### Kalau app "tidur"
-
-Siapa saja yang buka linknya akan lihat halaman "app ini sedang tidur,
-klik untuk membangunkan" — klik itu, tunggu ~30 detik, app hidup lagi.
-Data tidak hilang karena tersimpan di Turso, bukan di app.
+5. Deploy. App akan "tidur" kalau tidak diakses 12 jam — buka lagi, klik
+   "bangunkan", tunggu ~30 detik. Data tetap aman (di Turso, bukan di app).
 
 ---
 

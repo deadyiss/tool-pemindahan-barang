@@ -1,0 +1,6 @@
+.git
+__pycache__/
+*.pyc
+pemindahan.db
+dummy_harian/
+.devcontainer/

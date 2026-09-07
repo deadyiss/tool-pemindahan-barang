@@ -2,103 +2,160 @@
 Skema database & helper query untuk tool cek pemindahan barang.
 Lihat PRD §5 untuk desain skema.
 
-Koneksi database: pakai Turso (cloud, persisten -- lihat PRD soal kenapa SQLite
-lokal TIDAK aman dipakai di web-deploy gratis) kalau env var TURSO_DATABASE_URL
-& TURSO_AUTH_TOKEN sudah diset. Kalau belum diset (mis. waktu development di
-komputer sendiri), otomatis fallback ke file SQLite lokal -- supaya tetap bisa
-dites tanpa harus punya akun Turso dulu.
+Koneksi database -- 3 backend didukung, dipilih otomatis dari environment
+variable yang tersedia (urutan prioritas):
+  1. Postgres (mis. Neon) kalau DATABASE_URL diset -- BACKEND YANG
+     DIREKOMENDASIKAN untuk deploy web (lihat README bagian "Deploy ke Web
+     (Tercepat, Gratis)"): dipasangkan dengan hosting app di region Asia
+     (Google Cloud Run Jakarta) + database di region Asia (Neon Singapore),
+     jauh lebih dekat & cepat dari Indonesia dibanding Turso (Tokyo/Mumbai).
+  2. Turso (libsql) kalau TURSO_DATABASE_URL & TURSO_AUTH_TOKEN diset --
+     didukung untuk KOMPATIBILITAS ke belakang (deploy lama), tidak lagi
+     jadi rekomendasi utama karena region-nya lebih jauh dari Indonesia.
+  3. SQLite lokal (fallback) -- dipakai otomatis kalau dua env var di atas
+     tidak ada, mis. waktu development di komputer sendiri. JANGAN dipakai
+     untuk deploy web (storage-nya tidak persisten di kebanyakan platform
+     gratis).
+
+Fungsi-fungsi query di bawah file ini SEMUA ditulis pakai placeholder ala
+SQLite ("?", bukan "%s"-nya Postgres) supaya satu source code query bisa
+jalan di ketiga backend tanpa perlu ditulis ulang -- untuk Postgres,
+`_PGConnAdapter` di bawah ini yang menerjemahkan "?" -> "%s" secara
+transparan sebelum query dikirim ke psycopg2.
 """
 import os
 import sqlite3
 from contextlib import contextmanager
 
-DB_PATH = "pemindahan.db"  # dipakai kalau TURSO_DATABASE_URL tidak diset (mode lokal/dev)
-
-SCHEMA_STATEMENTS = [
-    """CREATE TABLE IF NOT EXISTS cabang_master (
-        cabang TEXT PRIMARY KEY,
-        format_sumber TEXT NOT NULL
-    )""",
-    """CREATE TABLE IF NOT EXISTS barang_master (
-        format_sumber TEXT NOT NULL,
-        sku TEXT NOT NULL,
-        nama_barang TEXT NOT NULL,
-        category TEXT,
-        PRIMARY KEY (format_sumber, sku)
-    )""",
-    """CREATE TABLE IF NOT EXISTS pemindahan_barang (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        format_sumber TEXT NOT NULL,
-        sku TEXT NOT NULL,
-        nama_barang TEXT NOT NULL,
-        cabang TEXT NOT NULL,
-        tanggal_pindah TEXT NOT NULL,
-        qty REAL NOT NULL,
-        sumber TEXT NOT NULL,
-        file_asal TEXT
-    )""",
-    """CREATE INDEX IF NOT EXISTS idx_pemindahan_lookup
-        ON pemindahan_barang (cabang, sku, tanggal_pindah)""",
-    # Cegah duplikat: fakta yang sama (barang+cabang+tanggal+qty) tidak boleh
-    # tercatat dua kali, walau berasal dari upload/file berbeda.
-    """CREATE UNIQUE INDEX IF NOT EXISTS uq_pemindahan_dedup
-        ON pemindahan_barang (cabang, sku, tanggal_pindah, qty)""",
-    # Riwayat tiap file yang pernah diproses tool.
-    """CREATE TABLE IF NOT EXISTS import_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nama_file TEXT NOT NULL,
-        cabang TEXT,
-        format_sumber TEXT,
-        tanggal_data TEXT,
-        n_baru INTEGER NOT NULL,
-        n_duplikat INTEGER NOT NULL,
-        konteks TEXT NOT NULL,
-        waktu_import TEXT NOT NULL
-    )""",
-    # Riwayat LENGKAP status jenis barang (PKP / Non-PKP / Keduanya). Setiap
-    # perubahan jadi baris baru (bukan ditimpa) -- status SAAT INI = baris
-    # dengan waktu_ubah terbaru untuk kombinasi format_sumber+sku itu.
-    """CREATE TABLE IF NOT EXISTS jenis_barang_riwayat (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        format_sumber TEXT NOT NULL,
-        sku TEXT NOT NULL,
-        jenis TEXT NOT NULL,
-        sumber TEXT NOT NULL,
-        waktu_ubah TEXT NOT NULL
-    )""",
-    """CREATE INDEX IF NOT EXISTS idx_jenis_barang_lookup
-        ON jenis_barang_riwayat (format_sumber, sku, waktu_ubah)""",
-    # Histori setiap kali barang dicek (lewat upload file ATAU cek manual).
-    # UNIQUE per (cabang, sku, tanggal): cek ulang untuk kombinasi yang sama
-    # akan MEMPERBARUI baris yang sudah ada, bukan menumpuk duplikat.
-    """CREATE TABLE IF NOT EXISTS penjualan_barang (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        format_sumber TEXT NOT NULL,
-        sku TEXT NOT NULL,
-        nama_barang TEXT NOT NULL,
-        cabang TEXT NOT NULL,
-        tanggal TEXT NOT NULL,
-        qty_terjual REAL NOT NULL,
-        sumber TEXT NOT NULL,
-        waktu_cek TEXT NOT NULL
-    )""",
-    """CREATE UNIQUE INDEX IF NOT EXISTS uq_penjualan_dedup
-        ON penjualan_barang (cabang, sku, tanggal)""",
-    """CREATE INDEX IF NOT EXISTS idx_penjualan_cari
-        ON penjualan_barang (tanggal, nama_barang, cabang, sku)""",
-]
+DB_PATH = "pemindahan.db"  # dipakai kalau tidak ada DATABASE_URL / TURSO_* (mode lokal/dev)
 
 
-def _is_turso_configured() -> bool:
-    return bool(os.environ.get("TURSO_DATABASE_URL")) and bool(os.environ.get("TURSO_AUTH_TOKEN"))
+class _PGConnAdapter:
+    """Bungkus koneksi psycopg2 (Postgres) supaya punya interface yang sama
+    dengan sqlite3.Connection.execute(sql, params) -- yaitu bisa dipanggil
+    LANGSUNG di object connection (bukan wajib bikin cursor dulu), dan
+    menerima placeholder gaya "?" seperti yang dipakai di semua fungsi query
+    pada file ini. Ini satu-satunya lapisan yang perlu tahu bedanya dialek
+    SQL Postgres vs SQLite -- fungsi query lain di bawah TIDAK perlu diubah."""
+
+    def __init__(self, pg_conn):
+        self._conn = pg_conn
+
+    def execute(self, sql: str, params: tuple = ()):
+        cur = self._conn.cursor()
+        cur.execute(sql.replace("?", "%s"), params)
+        return cur
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+
+def _backend() -> str:
+    if os.environ.get("DATABASE_URL"):
+        return "postgres"
+    if os.environ.get("TURSO_DATABASE_URL") and os.environ.get("TURSO_AUTH_TOKEN"):
+        return "turso"
+    return "sqlite"
+
+
+def _id_pk_sql(backend: str) -> str:
+    """Sintaks kolom id auto-increment beda antar dialek: Postgres pakai
+    SERIAL, SQLite/Turso (libsql, fork dari SQLite) pakai AUTOINCREMENT."""
+    return "SERIAL PRIMARY KEY" if backend == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+
+
+def _schema_statements(backend: str) -> list[str]:
+    id_pk = _id_pk_sql(backend)
+    return [
+        """CREATE TABLE IF NOT EXISTS cabang_master (
+            cabang TEXT PRIMARY KEY,
+            format_sumber TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS barang_master (
+            format_sumber TEXT NOT NULL,
+            sku TEXT NOT NULL,
+            nama_barang TEXT NOT NULL,
+            category TEXT,
+            PRIMARY KEY (format_sumber, sku)
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS pemindahan_barang (
+            id {id_pk},
+            format_sumber TEXT NOT NULL,
+            sku TEXT NOT NULL,
+            nama_barang TEXT NOT NULL,
+            cabang TEXT NOT NULL,
+            tanggal_pindah TEXT NOT NULL,
+            qty REAL NOT NULL,
+            sumber TEXT NOT NULL,
+            file_asal TEXT
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_pemindahan_lookup
+            ON pemindahan_barang (cabang, sku, tanggal_pindah)""",
+        # Cegah duplikat: fakta yang sama (barang+cabang+tanggal+qty) tidak boleh
+        # tercatat dua kali, walau berasal dari upload/file berbeda.
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_pemindahan_dedup
+            ON pemindahan_barang (cabang, sku, tanggal_pindah, qty)""",
+        # Riwayat tiap file yang pernah diproses tool.
+        f"""CREATE TABLE IF NOT EXISTS import_log (
+            id {id_pk},
+            nama_file TEXT NOT NULL,
+            cabang TEXT,
+            format_sumber TEXT,
+            tanggal_data TEXT,
+            n_baru INTEGER NOT NULL,
+            n_duplikat INTEGER NOT NULL,
+            konteks TEXT NOT NULL,
+            waktu_import TEXT NOT NULL
+        )""",
+        # Riwayat LENGKAP status jenis barang (PKP / Non-PKP / Keduanya). Setiap
+        # perubahan jadi baris baru (bukan ditimpa) -- status SAAT INI = baris
+        # dengan waktu_ubah terbaru untuk kombinasi format_sumber+sku itu.
+        f"""CREATE TABLE IF NOT EXISTS jenis_barang_riwayat (
+            id {id_pk},
+            format_sumber TEXT NOT NULL,
+            sku TEXT NOT NULL,
+            jenis TEXT NOT NULL,
+            sumber TEXT NOT NULL,
+            waktu_ubah TEXT NOT NULL
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_jenis_barang_lookup
+            ON jenis_barang_riwayat (format_sumber, sku, waktu_ubah)""",
+        # Histori setiap kali barang dicek (lewat upload file ATAU cek manual).
+        # UNIQUE per (cabang, sku, tanggal): cek ulang untuk kombinasi yang sama
+        # akan MEMPERBARUI baris yang sudah ada, bukan menumpuk duplikat.
+        f"""CREATE TABLE IF NOT EXISTS penjualan_barang (
+            id {id_pk},
+            format_sumber TEXT NOT NULL,
+            sku TEXT NOT NULL,
+            nama_barang TEXT NOT NULL,
+            cabang TEXT NOT NULL,
+            tanggal TEXT NOT NULL,
+            qty_terjual REAL NOT NULL,
+            sumber TEXT NOT NULL,
+            waktu_cek TEXT NOT NULL
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_penjualan_dedup
+            ON penjualan_barang (cabang, sku, tanggal)""",
+        """CREATE INDEX IF NOT EXISTS idx_penjualan_cari
+            ON penjualan_barang (tanggal, nama_barang, cabang, sku)""",
+    ]
 
 
 @contextmanager
 def get_conn(db_path: str = DB_PATH):
-    """Buka koneksi ke Turso (kalau env var-nya ada) atau ke file SQLite lokal
-    (fallback dev/testing). Dipanggil sebagai context manager: `with get_conn() as conn:`."""
-    if _is_turso_configured():
-        import libsql  # hanya di-import kalau memang dipakai -- tidak wajib ada saat dev lokal
+    """Buka koneksi ke Postgres (kalau DATABASE_URL diset), Turso (kalau
+    TURSO_DATABASE_URL/TOKEN diset), atau file SQLite lokal (fallback
+    dev/testing). Dipanggil sebagai context manager: `with get_conn() as conn:`."""
+    backend = _backend()
+    if backend == "postgres":
+        import psycopg2  # hanya di-import kalau memang dipakai
+
+        conn = _PGConnAdapter(psycopg2.connect(os.environ["DATABASE_URL"]))
+    elif backend == "turso":
+        import libsql  # hanya di-import kalau memang dipakai
 
         conn = libsql.connect(
             database=os.environ["TURSO_DATABASE_URL"],
@@ -113,20 +170,35 @@ def get_conn(db_path: str = DB_PATH):
         conn.close()
 
 
-def _migrasi_penjualan_barang_lama(conn):
+def _kolom_tabel(conn, backend: str, tabel: str) -> list[str]:
+    """Daftar nama kolom sebuah tabel -- dipakai untuk deteksi skema lama
+    sebelum migrasi. PRAGMA table_info cuma ada di SQLite/Turso; Postgres
+    pakai information_schema.columns (hasilnya sama-sama list nama kolom)."""
+    if backend == "postgres":
+        rows = conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+            (tabel,),
+        ).fetchall()
+    else:
+        rows = [(None, row[1]) for row in conn.execute(f"PRAGMA table_info({tabel})").fetchall()]
+    return [r[0] if backend == "postgres" else r[1] for r in rows]
+
+
+def _migrasi_penjualan_barang_lama(conn, backend: str):
     """Migrasi satu-kali: versi lama tabel penjualan_barang punya kolom
     valid/alasan/jenis_barang yang wajib diisi (NOT NULL). Kolom itu sudah
     dibuang dari skema baru, tapi CREATE TABLE IF NOT EXISTS tidak mengubah
     tabel yang sudah kepalang dibuat -- jadi INSERT versi baru (tanpa kolom
     itu) gagal kena constraint lama. Migrasi ini deteksi skema lama, lalu
     bongkar-pasang ulang tabelnya, memindahkan data yang masih kompatibel."""
-    cols = [row[1] for row in conn.execute("PRAGMA table_info(penjualan_barang)").fetchall()]
+    cols = _kolom_tabel(conn, backend, "penjualan_barang")
     if "valid" not in cols:
         return  # sudah skema baru, tidak perlu migrasi
+    id_pk = _id_pk_sql(backend)
     conn.execute("ALTER TABLE penjualan_barang RENAME TO penjualan_barang_lama")
     conn.execute(
-        """CREATE TABLE penjualan_barang (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        f"""CREATE TABLE penjualan_barang (
+            id {id_pk},
             format_sumber TEXT NOT NULL,
             sku TEXT NOT NULL,
             nama_barang TEXT NOT NULL,
@@ -156,22 +228,23 @@ def _migrasi_penjualan_barang_lama(conn):
     )
 
 
-def _migrasi_tambah_jenis_ke_penjualan(conn):
+def _migrasi_tambah_jenis_ke_penjualan(conn, backend: str):
     """Migrasi satu-kali: tambah kolom jenis_barang ke penjualan_barang (skema
     sempat membuang kolom ini, sekarang ditambah lagi -- kali ini nullable,
     supaya baris LAMA yang sudah tercatat tanpa info jenis tetap valid, cuma
     tampil 'Belum diklasifikasikan' untuk baris lama itu)."""
-    cols = [row[1] for row in conn.execute("PRAGMA table_info(penjualan_barang)").fetchall()]
+    cols = _kolom_tabel(conn, backend, "penjualan_barang")
     if "jenis_barang" not in cols:
         conn.execute("ALTER TABLE penjualan_barang ADD COLUMN jenis_barang TEXT")
 
 
 def init_db(db_path: str = DB_PATH):
+    backend = _backend()
     with get_conn(db_path) as conn:
-        for stmt in SCHEMA_STATEMENTS:
+        for stmt in _schema_statements(backend):
             conn.execute(stmt)
-        _migrasi_penjualan_barang_lama(conn)
-        _migrasi_tambah_jenis_ke_penjualan(conn)
+        _migrasi_penjualan_barang_lama(conn, backend)
+        _migrasi_tambah_jenis_ke_penjualan(conn, backend)
 
 
 def upsert_cabang(conn, cabang: str, format_sumber: str):
