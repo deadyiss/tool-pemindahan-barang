@@ -143,7 +143,8 @@ with tab_cek:
             st.caption(
                 f"Status histori pemindahan: **{status_text}** dari file ini "
                 f"({n_masuk_kandidat} baris Receive/Masuk > 0 terdeteksi)."
-                
+            )
+
             pending_notif = None
             bc1, bc2 = st.columns(2)
             with bc1:
