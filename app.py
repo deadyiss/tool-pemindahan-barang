@@ -198,7 +198,8 @@ with tab_cek:
                     hasil = []
                     for r in terjual_rows:
                         valid, alasan, jenis = db.cek_validitas_detail(
-                            conn, parsed.format_sumber, parsed.cabang, r.sku, TANGGAL_MINIMAL
+                            conn, parsed.format_sumber, parsed.cabang, r.sku,
+                            TANGGAL_MINIMAL, parsed.tanggal_awal,
                         )
                         hasil.append({
                             "sku": r.sku, "nama": r.nama_barang, "qty": r.qty_terjual,
@@ -249,21 +250,31 @@ with tab_cek:
         with cc3:
             qty_manual = st.number_input("Qty terjual", min_value=0.0, step=1.0, key="manual_cek_qty")
 
-        if st.button("Cek Validitas", key="manual_cek_button"):
+        vcol1, vcol2 = st.columns(2)
+        with vcol1:
+            klik_cek = st.button("Cek Validitas (tanpa simpan)", key="manual_cek_button", width="stretch")
+        with vcol2:
+            klik_simpan = st.button("Cek & Simpan Penjualan", key="manual_simpan_button", width="stretch")
+
+        if klik_cek or klik_simpan:
             sku_m, nama_m = barang_manual_opsi[barang_manual_pilih]
             with db.get_conn() as conn:
                 valid_m, alasan_m, jenis_m = db.cek_validitas_detail(
-                    conn, fmt_manual, cabang_manual, sku_m, TANGGAL_MINIMAL
+                    conn, fmt_manual, cabang_manual, sku_m, TANGGAL_MINIMAL,
+                    str(pd.Timestamp.now().date()),
                 )
-                db.simpan_penjualan(
-                    conn, format_sumber=fmt_manual, sku=sku_m, nama_barang=nama_m,
-                    cabang=cabang_manual, tanggal=str(pd.Timestamp.now().date()),
-                    qty_terjual=qty_manual, sumber="manual_cek", jenis_barang=jenis_m,
-                )
+                if klik_simpan:
+                    db.simpan_penjualan(
+                        conn, format_sumber=fmt_manual, sku=sku_m, nama_barang=nama_m,
+                        cabang=cabang_manual, tanggal=str(pd.Timestamp.now().date()),
+                        qty_terjual=qty_manual, sumber="manual_cek", jenis_barang=jenis_m,
+                    )
             if valid_m:
                 st.success(f"VALID -- {nama_m} ({jenis_m}). {alasan_m}")
             else:
                 st.error(f"TIDAK VALID -- {nama_m} ({jenis_m}). {alasan_m}")
+            if klik_simpan:
+                st.caption(f"Tersimpan ke penjualan hari ini ({pd.Timestamp.now().date()}), qty {qty_manual}.")
 
 # ---------------------------------------------------------------------------
 # TAB 2 — CRUD pemindahan barang (+ klasifikasi per tanggal + pagination)

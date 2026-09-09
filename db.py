@@ -624,9 +624,10 @@ def list_barang_dengan_jenis(
         LEFT JOIN (
             SELECT format_sumber, sku, jenis
             FROM jenis_barang_riwayat jr
-            WHERE waktu_ubah = (
-                SELECT MAX(waktu_ubah) FROM jenis_barang_riwayat jr2
+            WHERE id = (
+                SELECT id FROM jenis_barang_riwayat jr2
                 WHERE jr2.format_sumber = jr.format_sumber AND jr2.sku = jr.sku
+                ORDER BY waktu_ubah DESC, id DESC LIMIT 1
             )
         ) terkini ON terkini.format_sumber = bm.format_sumber AND terkini.sku = bm.sku
         {where_sql}
@@ -662,9 +663,10 @@ def count_barang_dengan_jenis(
         LEFT JOIN (
             SELECT format_sumber, sku, jenis
             FROM jenis_barang_riwayat jr
-            WHERE waktu_ubah = (
-                SELECT MAX(waktu_ubah) FROM jenis_barang_riwayat jr2
+            WHERE id = (
+                SELECT id FROM jenis_barang_riwayat jr2
                 WHERE jr2.format_sumber = jr.format_sumber AND jr2.sku = jr.sku
+                ORDER BY waktu_ubah DESC, id DESC LIMIT 1
             )
         ) terkini ON terkini.format_sumber = bm.format_sumber AND terkini.sku = bm.sku
         {where_sql}
@@ -689,9 +691,18 @@ LABEL_JENIS = {
 
 
 def cek_validitas_detail(
-    conn, format_sumber: str, cabang: str, sku: str, tanggal_minimal: str = "2026-08-01"
+    conn, format_sumber: str, cabang: str, sku: str, tanggal_minimal: str, tanggal_cek: str
 ) -> tuple[bool, str, str]:
-    """Return (valid, alasan, label_jenis)."""
+    """Return (valid, alasan, label_jenis).
+
+    tanggal_cek = tanggal TRANSAKSI PENJUALAN yang sedang divalidasi (bukan
+    tanggal hari ini menjalankan pengecekan). Barang dianggap valid HANYA
+    kalau ada catatan pemindahan (barang masuk) ke cabang ini pada rentang
+    [tanggal_minimal, tanggal_cek] -- pemindahan yang tanggalnya SETELAH
+    tanggal_cek TIDAK dihitung, supaya tidak salah anggap valid untuk
+    penjualan yang secara kronologis terjadi SEBELUM barangnya benar-benar
+    masuk ke cabang itu (mis. jual tanggal 3, barang baru masuk tanggal 5 --
+    itu harus TIDAK VALID, walau sekarang tanggalnya sudah lewat tanggal 5)."""
     jenis = get_jenis_barang(conn, format_sumber, sku)
     label = LABEL_JENIS.get(jenis, jenis)
 
@@ -700,13 +711,16 @@ def cek_validitas_detail(
 
     row = conn.execute(
         """SELECT tanggal_pindah FROM pemindahan_barang
-           WHERE cabang = ? AND sku = ? AND tanggal_pindah >= ?
+           WHERE cabang = ? AND sku = ? AND tanggal_pindah >= ? AND tanggal_pindah <= ?
            ORDER BY tanggal_pindah ASC LIMIT 1""",
-        (cabang, sku, tanggal_minimal),
+        (cabang, sku, tanggal_minimal, tanggal_cek),
     ).fetchone()
     if row:
         return True, f"Ada catatan pemindahan barang ke cabang ini pada {row[0]}.", label
-    return False, "Barang tidak memiliki catatan pemindahan ke cabang ini sejak Agustus.", label
+    return False, (
+        f"Barang tidak memiliki catatan pemindahan ke cabang ini pada atau sebelum "
+        f"{tanggal_cek} (sejak {tanggal_minimal})."
+    ), label
 
 
 # ---------------------------------------------------------------------------
