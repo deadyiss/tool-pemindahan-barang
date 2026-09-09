@@ -1,16 +1,3 @@
-"""
-Sinkronkan katalog barang LENGKAP (semua baris di tiap file, bukan cuma yang
-Receive/Masuk > 0) -- jalan lebih lambat dari backfill.py biasa, makanya
-dipisah jadi script sendiri, dijalankan SESEKALI saja saat butuh katalog
-lengkap (mis. sebelum seed klasifikasi PKP/Non-PKP/Keduanya, supaya lebih
-banyak barang di CSV klasifikasi bisa ketemu pasangannya).
-
-Tidak menyentuh data pemindahan sama sekali -- aman dijalankan kapan saja,
-tidak akan bikin data pemindahan dobel.
-
-Pemakaian:
-    python sync_katalog.py /path/ke/folder/Agustus
-"""
 import os
 import sys
 

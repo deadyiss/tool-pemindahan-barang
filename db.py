@@ -1,42 +1,11 @@
-"""
-Skema database & helper query untuk tool cek pemindahan barang.
-Lihat PRD §5 untuk desain skema.
-
-Koneksi database -- 3 backend didukung, dipilih otomatis dari environment
-variable yang tersedia (urutan prioritas):
-  1. Postgres (mis. Neon) kalau DATABASE_URL diset -- BACKEND YANG
-     DIREKOMENDASIKAN untuk deploy web (lihat README bagian "Deploy ke Web
-     (Tercepat, Gratis)"): dipasangkan dengan hosting app di region Asia
-     (Google Cloud Run Jakarta) + database di region Asia (Neon Singapore),
-     jauh lebih dekat & cepat dari Indonesia dibanding Turso (Tokyo/Mumbai).
-  2. Turso (libsql) kalau TURSO_DATABASE_URL & TURSO_AUTH_TOKEN diset --
-     didukung untuk KOMPATIBILITAS ke belakang (deploy lama), tidak lagi
-     jadi rekomendasi utama karena region-nya lebih jauh dari Indonesia.
-  3. SQLite lokal (fallback) -- dipakai otomatis kalau dua env var di atas
-     tidak ada, mis. waktu development di komputer sendiri. JANGAN dipakai
-     untuk deploy web (storage-nya tidak persisten di kebanyakan platform
-     gratis).
-
-Fungsi-fungsi query di bawah file ini SEMUA ditulis pakai placeholder ala
-SQLite ("?", bukan "%s"-nya Postgres) supaya satu source code query bisa
-jalan di ketiga backend tanpa perlu ditulis ulang -- untuk Postgres,
-`_PGConnAdapter` di bawah ini yang menerjemahkan "?" -> "%s" secara
-transparan sebelum query dikirim ke psycopg2.
-"""
 import os
 import sqlite3
 from contextlib import contextmanager
 
-DB_PATH = "pemindahan.db"  # dipakai kalau tidak ada DATABASE_URL / TURSO_* (mode lokal/dev)
+DB_PATH = "pemindahan.db" 
 
 
 class _PGConnAdapter:
-    """Bungkus koneksi psycopg2 (Postgres) supaya punya interface yang sama
-    dengan sqlite3.Connection.execute(sql, params) -- yaitu bisa dipanggil
-    LANGSUNG di object connection (bukan wajib bikin cursor dulu), dan
-    menerima placeholder gaya "?" seperti yang dipakai di semua fungsi query
-    pada file ini. Ini satu-satunya lapisan yang perlu tahu bedanya dialek
-    SQL Postgres vs SQLite -- fungsi query lain di bawah TIDAK perlu diubah."""
 
     def __init__(self, pg_conn):
         self._conn = pg_conn
@@ -62,8 +31,6 @@ def _backend() -> str:
 
 
 def _id_pk_sql(backend: str) -> str:
-    """Sintaks kolom id auto-increment beda antar dialek: Postgres pakai
-    SERIAL, SQLite/Turso (libsql, fork dari SQLite) pakai AUTOINCREMENT."""
     return "SERIAL PRIMARY KEY" if backend == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
 
@@ -94,11 +61,8 @@ def _schema_statements(backend: str) -> list[str]:
         )""",
         """CREATE INDEX IF NOT EXISTS idx_pemindahan_lookup
             ON pemindahan_barang (cabang, sku, tanggal_pindah)""",
-        # Cegah duplikat: fakta yang sama (barang+cabang+tanggal+qty) tidak boleh
-        # tercatat dua kali, walau berasal dari upload/file berbeda.
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_pemindahan_dedup
             ON pemindahan_barang (cabang, sku, tanggal_pindah, qty)""",
-        # Riwayat tiap file yang pernah diproses tool.
         f"""CREATE TABLE IF NOT EXISTS import_log (
             id {id_pk},
             nama_file TEXT NOT NULL,
@@ -110,9 +74,6 @@ def _schema_statements(backend: str) -> list[str]:
             konteks TEXT NOT NULL,
             waktu_import TEXT NOT NULL
         )""",
-        # Riwayat LENGKAP status jenis barang (PKP / Non-PKP / Keduanya). Setiap
-        # perubahan jadi baris baru (bukan ditimpa) -- status SAAT INI = baris
-        # dengan waktu_ubah terbaru untuk kombinasi format_sumber+sku itu.
         f"""CREATE TABLE IF NOT EXISTS jenis_barang_riwayat (
             id {id_pk},
             format_sumber TEXT NOT NULL,
@@ -123,9 +84,6 @@ def _schema_statements(backend: str) -> list[str]:
         )""",
         """CREATE INDEX IF NOT EXISTS idx_jenis_barang_lookup
             ON jenis_barang_riwayat (format_sumber, sku, waktu_ubah)""",
-        # Histori setiap kali barang dicek (lewat upload file ATAU cek manual).
-        # UNIQUE per (cabang, sku, tanggal): cek ulang untuk kombinasi yang sama
-        # akan MEMPERBARUI baris yang sudah ada, bukan menumpuk duplikat.
         f"""CREATE TABLE IF NOT EXISTS penjualan_barang (
             id {id_pk},
             format_sumber TEXT NOT NULL,
@@ -151,11 +109,11 @@ def get_conn(db_path: str = DB_PATH):
     dev/testing). Dipanggil sebagai context manager: `with get_conn() as conn:`."""
     backend = _backend()
     if backend == "postgres":
-        import psycopg2  # hanya di-import kalau memang dipakai
+        import psycopg2
 
         conn = _PGConnAdapter(psycopg2.connect(os.environ["DATABASE_URL"]))
     elif backend == "turso":
-        import libsql  # hanya di-import kalau memang dipakai
+        import libsql
 
         conn = libsql.connect(
             database=os.environ["TURSO_DATABASE_URL"],
@@ -171,9 +129,6 @@ def get_conn(db_path: str = DB_PATH):
 
 
 def _kolom_tabel(conn, backend: str, tabel: str) -> list[str]:
-    """Daftar nama kolom sebuah tabel -- dipakai untuk deteksi skema lama
-    sebelum migrasi. PRAGMA table_info cuma ada di SQLite/Turso; Postgres
-    pakai information_schema.columns (hasilnya sama-sama list nama kolom)."""
     if backend == "postgres":
         rows = conn.execute(
             "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
@@ -185,15 +140,9 @@ def _kolom_tabel(conn, backend: str, tabel: str) -> list[str]:
 
 
 def _migrasi_penjualan_barang_lama(conn, backend: str):
-    """Migrasi satu-kali: versi lama tabel penjualan_barang punya kolom
-    valid/alasan/jenis_barang yang wajib diisi (NOT NULL). Kolom itu sudah
-    dibuang dari skema baru, tapi CREATE TABLE IF NOT EXISTS tidak mengubah
-    tabel yang sudah kepalang dibuat -- jadi INSERT versi baru (tanpa kolom
-    itu) gagal kena constraint lama. Migrasi ini deteksi skema lama, lalu
-    bongkar-pasang ulang tabelnya, memindahkan data yang masih kompatibel."""
     cols = _kolom_tabel(conn, backend, "penjualan_barang")
     if "valid" not in cols:
-        return  # sudah skema baru, tidak perlu migrasi
+        return
     id_pk = _id_pk_sql(backend)
     conn.execute("ALTER TABLE penjualan_barang RENAME TO penjualan_barang_lama")
     conn.execute(
@@ -216,8 +165,6 @@ def _migrasi_penjualan_barang_lama(conn, backend: str):
            FROM penjualan_barang_lama"""
     )
     conn.execute("DROP TABLE penjualan_barang_lama")
-    # Index lama ikut "menempel" ke tabel lama saat di-RENAME, jadi ikut hilang
-    # waktu tabel lama di-DROP -- perlu dibuat ulang di sini untuk tabel baru.
     conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_penjualan_dedup
            ON penjualan_barang (cabang, sku, tanggal)"""
@@ -229,10 +176,6 @@ def _migrasi_penjualan_barang_lama(conn, backend: str):
 
 
 def _migrasi_tambah_jenis_ke_penjualan(conn, backend: str):
-    """Migrasi satu-kali: tambah kolom jenis_barang ke penjualan_barang (skema
-    sempat membuang kolom ini, sekarang ditambah lagi -- kali ini nullable,
-    supaya baris LAMA yang sudah tercatat tanpa info jenis tetap valid, cuma
-    tampil 'Belum diklasifikasikan' untuk baris lama itu)."""
     cols = _kolom_tabel(conn, backend, "penjualan_barang")
     if "jenis_barang" not in cols:
         conn.execute("ALTER TABLE penjualan_barang ADD COLUMN jenis_barang TEXT")
@@ -278,11 +221,6 @@ def insert_pemindahan(
     sumber: str,
     file_asal: str | None = None,
 ) -> int | None:
-    """Insert 1 record pemindahan. Return id record kalau benar-benar disimpan,
-    None kalau di-skip karena sudah ada record identik (cabang+sku+tanggal+qty)
-    -- lihat uq_pemindahan_dedup di SCHEMA. Pakai INSERT...RETURNING (1 round-trip)
-    daripada INSERT lalu SELECT terpisah (2 round-trip) -- penting buat performa
-    karena tiap query ke Turso itu 1 kali lewat jaringan."""
     cur = conn.execute(
         """INSERT INTO pemindahan_barang
            (format_sumber, sku, nama_barang, cabang, tanggal_pindah, qty, sumber, file_asal)
@@ -296,19 +234,6 @@ def insert_pemindahan(
 
 
 def simpan_pemindahan_dari_parsed(conn, parsed, sumber: str, file_asal: str | None = None) -> list[int]:
-    """Helper terpusat: dari hasil parser.parse_file(), simpan tiap baris dengan
-    qty_masuk > 0 sebagai record pemindahan (dedup otomatis lewat insert_pemindahan).
-    Dipakai oleh backfill.py, tab Backfill, DAN tab Pengecekan Harian.
-
-    PENTING soal performa: cuma baris qty_masuk > 0 yang di-upsert ke barang_master
-    di sini (bukan SEMUA ~900 baris per file) -- karena tiap query ke Turso adalah
-    1 round-trip jaringan, upsert 900 baris/file itu yang bikin upload lambat
-    (bisa 10 menit/file). Konsekuensinya: barang yang TIDAK PERNAH punya Receive/
-    Masuk > 0 di file manapun tidak otomatis masuk katalog. Kalau butuh katalog
-    lengkap (semua barang, termasuk yang belum pernah masuk), pakai
-    sinkronkan_katalog_lengkap() secara terpisah (jalan sesekali, bukan tiap upload).
-
-    Return: daftar id record BARU yang benar-benar tersimpan (bukan duplikat)."""
     upsert_cabang(conn, parsed.cabang, parsed.format_sumber)
     id_baru = []
     for row in parsed.rows:
@@ -331,22 +256,6 @@ def simpan_pemindahan_dari_parsed(conn, parsed, sumber: str, file_asal: str | No
 
 
 def simpan_penjualan_dari_parsed(conn, parsed, sumber: str, file_asal: str | None = None) -> int:
-    """Helper terpusat: dari hasil parser.parse_file(), simpan tiap baris dengan
-    qty_terjual > 0 sebagai record penjualan (upsert per cabang+sku+tanggal --
-    lihat simpan_penjualan() untuk detail perilaku konflik). Dipakai oleh tombol
-    'Simpan Penjualan' di tab Import Massal.
-
-    Sama seperti simpan_pemindahan_dari_parsed(): nama_barang/sku/category
-    tetap di-upsert ke barang_master untuk baris yang diproses di sini (baris
-    qty_terjual > 0) supaya nama barang & SKU-nya tetap lengkap di katalog,
-    walau baris itu tidak ikut ke-upsert lewat tombol 'Simpan Barang Masuk'.
-
-    Jenis barang (PKP/Non-PKP/Keduanya) ikut disertakan sebagai snapshot
-    status SAAT ini (kalau sudah pernah diklasifikasikan) -- perilaku sama
-    dengan pengecekan harian manual, lihat simpan_penjualan() untuk kenapa
-    snapshot ini tidak berubah lagi walau klasifikasinya diubah belakangan.
-
-    Return: jumlah baris yang diproses (tersimpan baru ATAU diperbarui)."""
     upsert_cabang(conn, parsed.cabang, parsed.format_sumber)
     n = 0
     for row in parsed.rows:
@@ -369,12 +278,6 @@ def simpan_penjualan_dari_parsed(conn, parsed, sumber: str, file_asal: str | Non
 
 
 def sinkronkan_katalog_lengkap(conn, parsed) -> int:
-    """Upsert SEMUA baris (bukan cuma qty_masuk > 0) ke barang_master --
-    dipakai lewat tombol terpisah 'Sinkronkan Katalog Lengkap', dijalankan
-    sesekali kalau perlu katalog barang yang benar-benar lengkap (termasuk
-    barang yang belum pernah ada transaksi Receive-nya). TIDAK dipanggil
-    otomatis tiap upload harian karena lambat (lihat catatan performa di
-    simpan_pemindahan_dari_parsed)."""
     upsert_cabang(conn, parsed.cabang, parsed.format_sumber)
     n = 0
     for row in parsed.rows:
@@ -384,7 +287,6 @@ def sinkronkan_katalog_lengkap(conn, parsed) -> int:
 
 
 def cek_validitas(conn, cabang: str, sku: str, tanggal_minimal: str = "2026-08-01") -> bool:
-    """True kalau barang pernah dipindahkan ke cabang ini sejak tanggal_minimal."""
     row = conn.execute(
         """SELECT 1 FROM pemindahan_barang
            WHERE cabang = ? AND sku = ? AND tanggal_pindah >= ?
@@ -420,9 +322,6 @@ def list_pemindahan(
     limit: int = 200,
     offset: int = 0,
 ):
-    """Ambil record pemindahan dengan filter cabang & pencarian nama/SKU,
-    plus pagination (limit+offset) -- supaya data yang jumlahnya ribuan tetap
-    bisa di-scroll semua lewat 'halaman berikutnya', bukan cuma 200 pertama."""
     where = []
     params = []
     if cabang:
@@ -464,9 +363,6 @@ def delete_pemindahan(conn, id_: int):
 
 
 def delete_pemindahan_batch(conn, id_list: list[int]):
-    """Hapus banyak record sekaligus berdasarkan ID -- dipakai buat 'undo'
-    auto-capture waktu checkbox 'simpan ke histori' dimatikan lagi setelah
-    sempat dicentang (lihat app.py tab Pengecekan Harian)."""
     if not id_list:
         return
     placeholders = ",".join("?" for _ in id_list)
@@ -481,9 +377,6 @@ def update_pemindahan(conn, id_: int, tanggal_pindah: str, qty: float):
 
 
 def list_tanggal_pemindahan(conn, cabang: str):
-    """Daftar tanggal unik yang punya record pemindahan untuk 1 cabang,
-    beserta jumlah barang -- dipakai fitur 'klasifikasi barang masuk per
-    tanggal' di tab Kelola Data Pemindahan."""
     return conn.execute(
         """SELECT tanggal_pindah, COUNT(*) AS jumlah_barang, SUM(qty) AS total_qty
            FROM pemindahan_barang WHERE cabang = ?
@@ -493,8 +386,6 @@ def list_tanggal_pemindahan(conn, cabang: str):
 
 
 def list_detail_tanggal(conn, cabang: str, tanggal: str):
-    """Rincian barang (SKU, nama, qty) untuk 1 cabang di 1 tanggal spesifik --
-    dipanggil setelah user pilih tanggal & klik 'Lihat Detail'."""
     return conn.execute(
         """SELECT sku, nama_barang, qty FROM pemindahan_barang
            WHERE cabang = ? AND tanggal_pindah = ? ORDER BY nama_barang""",
@@ -541,23 +432,12 @@ def list_import_log(conn, limit: int = 300):
 
 
 def hapus_semua_pemindahan(conn):
-    """Hapus SEMUA record pemindahan_barang (barang_master, cabang_master, dan
-    import_log tetap dibiarkan). Dipakai kalau backfill dari Excel ternyata
-    mau dibuang total dan diganti sumber lain yang lebih akurat (mis. hasil
-    verifikasi manual ke Accurate) -- lihat PRD §11."""
     conn.execute("DELETE FROM pemindahan_barang")
 
-
-# ---------------------------------------------------------------------------
-# Jenis Barang: PKP / Non-PKP / Keduanya -- riwayat lengkap (bukan cuma status
-# terkini yang ditimpa).
-# ---------------------------------------------------------------------------
 JENIS_VALID = ("pkp", "nonpkp", "keduanya")
 
 
 def set_jenis_barang(conn, format_sumber: str, sku: str, jenis: str, sumber: str):
-    """Catat perubahan jenis barang sebagai baris RIWAYAT baru (bukan update di
-    tempat) -- supaya histori lengkap kapan status berubah dari apa ke apa."""
     import datetime
 
     if jenis not in JENIS_VALID:
@@ -570,8 +450,6 @@ def set_jenis_barang(conn, format_sumber: str, sku: str, jenis: str, sumber: str
 
 
 def get_jenis_barang(conn, format_sumber: str, sku: str) -> str | None:
-    """Status jenis TERKINI (baris riwayat terbaru) untuk 1 barang. None kalau
-    belum pernah diklasifikasikan sama sekali."""
     row = conn.execute(
         """SELECT jenis FROM jenis_barang_riwayat
            WHERE format_sumber = ? AND sku = ?
@@ -582,7 +460,6 @@ def get_jenis_barang(conn, format_sumber: str, sku: str) -> str | None:
 
 
 def list_riwayat_jenis_barang(conn, format_sumber: str, sku: str):
-    """Seluruh riwayat perubahan jenis untuk 1 barang, terbaru dulu."""
     return conn.execute(
         """SELECT jenis, sumber, waktu_ubah FROM jenis_barang_riwayat
            WHERE format_sumber = ? AND sku = ?
@@ -594,14 +471,11 @@ def list_riwayat_jenis_barang(conn, format_sumber: str, sku: str):
 def list_barang_dengan_jenis(
     conn,
     format_sumber: str | None = None,
-    filter_jenis: str | None = None,  # 'pkp' | 'nonpkp' | 'keduanya' | 'belum'
+    filter_jenis: str | None = None,  
     search: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
-    """Daftar barang di barang_master + status jenis TERKINI-nya (LEFT JOIN ke
-    baris riwayat terbaru per barang). filter_jenis='belum' artinya barang yang
-    sama sekali belum pernah diklasifikasikan."""
     where = []
     params: list = []
     if format_sumber:
@@ -674,14 +548,6 @@ def count_barang_dengan_jenis(
     row = conn.execute(sql, tuple(params)).fetchone()
     return row[0] if row else 0
 
-
-# ---------------------------------------------------------------------------
-# Validitas dengan detail alasan + status jenis barang (PKP/Non-PKP/Keduanya).
-# Aturan (dikonfirmasi client):
-#   - Non-PKP  -> SELALU tidak valid, apapun histori pemindahannya.
-#   - PKP / Keduanya / belum diklasifikasikan -> pakai aturan lama (pernah ada
-#     Receive/Masuk sejak tanggal_minimal ke cabang yang sama).
-# ---------------------------------------------------------------------------
 LABEL_JENIS = {
     "pkp": "PKP",
     "nonpkp": "Non-PKP",
@@ -693,16 +559,6 @@ LABEL_JENIS = {
 def cek_validitas_detail(
     conn, format_sumber: str, cabang: str, sku: str, tanggal_minimal: str, tanggal_cek: str
 ) -> tuple[bool, str, str]:
-    """Return (valid, alasan, label_jenis).
-
-    tanggal_cek = tanggal TRANSAKSI PENJUALAN yang sedang divalidasi (bukan
-    tanggal hari ini menjalankan pengecekan). Barang dianggap valid HANYA
-    kalau ada catatan pemindahan (barang masuk) ke cabang ini pada rentang
-    [tanggal_minimal, tanggal_cek] -- pemindahan yang tanggalnya SETELAH
-    tanggal_cek TIDAK dihitung, supaya tidak salah anggap valid untuk
-    penjualan yang secara kronologis terjadi SEBELUM barangnya benar-benar
-    masuk ke cabang itu (mis. jual tanggal 3, barang baru masuk tanggal 5 --
-    itu harus TIDAK VALID, walau sekarang tanggalnya sudah lewat tanggal 5)."""
     jenis = get_jenis_barang(conn, format_sumber, sku)
     label = LABEL_JENIS.get(jenis, jenis)
 
@@ -723,9 +579,6 @@ def cek_validitas_detail(
     ), label
 
 
-# ---------------------------------------------------------------------------
-# Histori penjualan (hasil tiap pengecekan, dari upload file ATAU cek manual).
-# ---------------------------------------------------------------------------
 def simpan_penjualan(
     conn,
     format_sumber: str,
@@ -737,15 +590,6 @@ def simpan_penjualan(
     sumber: str,
     jenis_barang: str | None = None,
 ):
-    """Upsert 1 baris histori penjualan. Catatan apa yang terjual + label
-    JENIS BARANG SAAT ITU DICEK (snapshot terkunci -- lihat catatan di bawah).
-
-    Cek ulang untuk kombinasi cabang+sku+tanggal yang sama akan MEMPERBARUI
-    qty (bukan menumpuk duplikat). TAPI kolom jenis_barang SENGAJA TIDAK ikut
-    diperbarui saat konflik -- begitu sebuah baris pertama kali tercatat,
-    jenisnya terkunci selamanya sesuai kondisi saat itu, walau barangnya
-    diklasifikasikan ulang belakangan (mis. dari Non-PKP jadi PKP). Ini
-    keputusan desain yang disengaja, dikonfirmasi ke user."""
     import datetime
 
     conn.execute(

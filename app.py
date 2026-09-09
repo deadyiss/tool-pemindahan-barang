@@ -29,7 +29,7 @@ def format_tanggal_id(tanggal_str: str) -> str:
         return f"{int(d)} {_BULAN_ID[int(m)]} {int(y)}"
     except Exception:
         return tanggal_str
-HALAMAN_SIZE = 50  # baris per halaman di tabel-tabel panjang
+HALAMAN_SIZE = 50 
 
 APP_USERNAME = os.environ.get("APP_USERNAME", "admin")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "ujangadmin")
@@ -37,13 +37,6 @@ APP_PASSWORD = os.environ.get("APP_PASSWORD", "ujangadmin")
 JENIS_OPSI = ["pkp", "nonpkp", "keduanya"]
 JENIS_LABEL = {"pkp": "PKP", "nonpkp": "Non-PKP", "keduanya": "Keduanya"}
 
-
-# ---------------------------------------------------------------------------
-# Autentikasi -- 1 user shared.
-# CATATAN JUJUR: autocomplete="off"/"new-password" cuma "permintaan" ke
-# browser, bukan jaminan -- browser modern kadang tetap menawarkan simpan
-# password walau atributnya diset.
-# ---------------------------------------------------------------------------
 def require_login():
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
@@ -113,9 +106,7 @@ tab_cek, tab_pemindahan, tab_penjualan, tab_jenis, tab_backfill, tab_log = st.ta
     ]
 )
 
-# ---------------------------------------------------------------------------
-# TAB 1 — Pengecekan harian (file) + cek manual satu barang (tanpa file)
-# ---------------------------------------------------------------------------
+
 with tab_cek:
     st.subheader("Upload Excel penjualan cabang hari ini")
     st.caption(
@@ -125,7 +116,7 @@ with tab_cek:
     uploaded = st.file_uploader("File Excel", type=["xlsx"], key="cek_upload")
 
     if "auto_capture_state" not in st.session_state:
-        st.session_state.auto_capture_state = {}  # file_id -> {"ids":[...], "n_baru":n, "n_dup":n}
+        st.session_state.auto_capture_state = {}  
 
     if uploaded is not None:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -142,7 +133,6 @@ with tab_cek:
                 f"**Tanggal:** {parsed.tanggal_awal}"
             )
 
-            # --- Simpan / Batal Simpan ke histori pemindahan ---
             n_masuk_kandidat = sum(1 for r in parsed.rows if r.qty_masuk > 0)
             file_key = uploaded.file_id
             state = st.session_state.auto_capture_state.get(file_key)
@@ -153,14 +143,7 @@ with tab_cek:
             st.caption(
                 f"Status histori pemindahan: **{status_text}** dari file ini "
                 f"({n_masuk_kandidat} baris Receive/Masuk > 0 terdeteksi)."
-            )
-            # Kolom dibagi rata 50:50 + tombol width="stretch" -- supaya
-            # tombolnya selalu selebar kolomnya sendiri di layar manapun
-            # (HP/desktop) dan teksnya TIDAK pernah kepotong "...". Notifikasi
-            # SENGAJA dipanggil di LUAR blok "with bc1:"/"with bc2:" -- kalau
-            # dipanggil di dalam, lebar notif kebatasi seukuran kolom sempit
-            # itu (makanya sebelumnya notif "Batal Simpan" jadi kotak kecil,
-            # beda dengan notif lain yang selebar halaman).
+                
             pending_notif = None
             bc1, bc2 = st.columns(2)
             with bc1:
@@ -176,13 +159,6 @@ with tab_cek:
                             format_sumber=parsed.format_sumber, tanggal_data=parsed.tanggal_awal,
                             n_baru=n_baru, n_duplikat=n_dup, konteks="pengecekan_harian",
                         )
-                    # Tombol ini SENGAJA selalu aktif (tidak ada syarat apa pun
-                    # untuk bisa diklik) -- kalau file sudah pernah disimpan
-                    # sebagian/semua, klik ulang aman: baris yang sudah ada
-                    # otomatis di-skip oleh insert_pemindahan_dari_parsed
-                    # (deteksi duplikat by cabang+sku+tanggal+qty), jadi
-                    # id_baru dari SETIAP klik di-akumulasi (bukan ditimpa)
-                    # supaya "Batal Simpan" tetap bisa membatalkan semuanya.
                     existing = st.session_state.auto_capture_state.get(file_key)
                     if existing:
                         existing["ids"].extend(id_baru)
@@ -204,7 +180,6 @@ with tab_cek:
             if pending_notif:
                 notif_dan_rerun(*pending_notif)
 
-            # --- Pengecekan validitas barang terjual (selalu jalan, terpisah dari simpan histori) ---
             terjual_rows = [r for r in parsed.rows if r.qty_terjual > 0]
             if not terjual_rows:
                 st.info("Tidak ada barang dengan penjualan > 0 di file ini.")
@@ -300,9 +275,6 @@ with tab_cek:
             if klik_simpan:
                 st.caption(f"Tersimpan ke penjualan hari ini ({pd.Timestamp.now().date()}), qty {qty_manual}.")
 
-# ---------------------------------------------------------------------------
-# TAB 2 — CRUD pemindahan barang (+ klasifikasi per tanggal + pagination)
-# ---------------------------------------------------------------------------
 with tab_pemindahan:
     st.subheader("Tambah record pemindahan barang")
     st.caption("Input manual (tanpa file) -- untuk pemindahan yang belum sempat masuk lewat excel.")
@@ -452,9 +424,6 @@ with tab_pemindahan:
             else:
                 st.error("Ketik persis 'HAPUS SEMUA' untuk konfirmasi.")
 
-# ---------------------------------------------------------------------------
-# TAB 3 — Kelola Data Penjualan (histori hasil cek, bisa dicari)
-# ---------------------------------------------------------------------------
 with tab_penjualan:
     st.subheader("Cari histori penjualan")
     st.caption("Setiap hasil pengecekan (upload file maupun cek manual) otomatis tersimpan di sini.")
@@ -543,9 +512,6 @@ with tab_penjualan:
     else:
         st.info("Tidak ada histori penjualan yang cocok dengan filter ini.")
 
-# ---------------------------------------------------------------------------
-# TAB 4 — Kelola Jenis Barang (PKP / Non-PKP / Keduanya)
-# ---------------------------------------------------------------------------
 with tab_jenis:
     st.subheader("Tambah / ubah jenis barang")
     st.caption("Tiap perubahan tercatat sebagai riwayat (tidak menimpa histori lama).")
@@ -668,9 +634,6 @@ with tab_jenis:
     else:
         st.info("Tidak ada barang yang cocok dengan filter ini.")
 
-# ---------------------------------------------------------------------------
-# TAB 5 — Backfill batch (xlsx / zip) + sinkronkan katalog lengkap
-# ---------------------------------------------------------------------------
 with tab_backfill:
     st.subheader("Import massal file Excel")
     st.caption(
@@ -742,7 +705,7 @@ with tab_backfill:
                                            format_sumber=parsed.format_sumber, tanggal_data=parsed.tanggal_awal,
                                            n_baru=n_baru_pj, n_duplikat=0, konteks="backfill_tab_penjualan")
                             n_rows += n_baru_pj
-                        else:  # jalankan_katalog
+                        else:  
                             n_rows += db.sinkronkan_katalog_lengkap(conn, parsed)
                         n_ok += 1
                     except Exception as e:
@@ -764,9 +727,6 @@ with tab_backfill:
                 for fn, err in fail_log:
                     st.text(f"- {fn}: {err}")
 
-# ---------------------------------------------------------------------------
-# TAB 6 — Riwayat import
-# ---------------------------------------------------------------------------
 with tab_log:
     st.subheader("Riwayat file yang pernah diproses")
     with db.get_conn() as conn:

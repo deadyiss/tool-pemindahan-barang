@@ -1,10 +1,3 @@
-"""
-Parser untuk 2 format laporan Excel (lihat PRD §2.2):
-- 'movement' : Laporan Stok - Movement Stock (SKU ditulis sebagai formula ="...")
-- 'daftar'   : Daftar Stok (SKU ditulis sebagai string biasa)
-
-Format dideteksi otomatis dari ISI file (teks judul), bukan dari nama file.
-"""
 import re
 from dataclasses import dataclass
 
@@ -31,13 +24,6 @@ class ParsedFile:
 
 
 def _to_iso_date(raw: str) -> str:
-    """Ambil tanggal PERTAMA dari string periode, ubah ke ISO YYYY-MM-DD.
-    Menangani 2 gaya penulisan yang ditemukan di data:
-      '11/08/2026 - 11/08/2026'         -> DD/MM/YYYY
-      '1 August 2026 - 2 August 2026'   -> D Month YYYY
-    Kalau periode berupa rentang (misal 01/08-02/08), diambil TANGGAL AWAL
-    sesuai keputusan PRD §2.4.
-    """
     raw = raw.strip()
     m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", raw)
     if m:
@@ -59,7 +45,6 @@ def _to_iso_date(raw: str) -> str:
 
 
 def detect_format(ws) -> str | None:
-    """Cek 12 baris pertama x 4 kolom pertama untuk teks penanda format."""
     text = []
     for r in range(1, 13):
         for c in range(1, 5):
@@ -98,8 +83,6 @@ def _parse_movement(ws) -> ParsedFile:
         m = SKU_FORMULA_PATTERN.match(str(sku_cell))
         sku = m.group(1) if m else str(sku_cell)
         if not sku.strip():
-            # Baris tanpa SKU (mis. baris kategori/subtotal seperti "SLOKI") -
-            # bukan barang individual yang bisa dipindahkan/dilacak per-SKU, skip.
             continue
         category = row[2].value
         stok_awal, receive, retur, transfer_in, penjualan = [
