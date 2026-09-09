@@ -14,6 +14,21 @@ from parser import parse_file
 st.set_page_config(page_title="Cek Pemindahan Barang", layout="wide")
 
 TANGGAL_MINIMAL = "2026-08-01"
+
+_BULAN_ID = {
+    1: "Januari", 2: "Februari", 3: "Maret", 4: "April", 5: "Mei", 6: "Juni",
+    7: "Juli", 8: "Agustus", 9: "September", 10: "Oktober", 11: "November", 12: "Desember",
+}
+
+
+def format_tanggal_id(tanggal_str: str) -> str:
+    """'2026-09-03' -> '3 September 2026'. Kalau formatnya tak terduga,
+    kembalikan apa adanya supaya tidak error di tampilan."""
+    try:
+        y, m, d = tanggal_str.split("-")
+        return f"{int(d)} {_BULAN_ID[int(m)]} {int(y)}"
+    except Exception:
+        return tanggal_str
 HALAMAN_SIZE = 50  # baris per halaman di tabel-tabel panjang
 
 APP_USERNAME = os.environ.get("APP_USERNAME", "admin")
@@ -218,6 +233,11 @@ with tab_cek:
                 c2.metric("Valid (boleh diinput)", n_valid)
                 c3.metric("Tidak valid", len(hasil) - n_valid)
 
+                st.caption(
+                    f"Rentang pengecekan: {format_tanggal_id(TANGGAL_MINIMAL)} -- "
+                    f"{format_tanggal_id(parsed.tanggal_awal)} (tanggal file ini). "
+                    f"Barang dianggap valid kalau ada pemindahan ke cabang ini di rentang tanggal tsb."
+                )
                 render_tabel_hasil(hasil)
 
                 df_download = pd.DataFrame([
@@ -273,6 +293,10 @@ with tab_cek:
                 st.success(f"VALID -- {nama_m} ({jenis_m}). {alasan_m}")
             else:
                 st.error(f"TIDAK VALID -- {nama_m} ({jenis_m}). {alasan_m}")
+            st.caption(
+                f"Rentang pengecekan: {format_tanggal_id(TANGGAL_MINIMAL)} -- "
+                f"{format_tanggal_id(str(pd.Timestamp.now().date()))} (hari ini)."
+            )
             if klik_simpan:
                 st.caption(f"Tersimpan ke penjualan hari ini ({pd.Timestamp.now().date()}), qty {qty_manual}.")
 
