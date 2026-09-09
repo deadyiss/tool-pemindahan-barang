@@ -149,7 +149,7 @@ with tab_cek:
             pending_notif = None
             bc1, bc2 = st.columns(2)
             with bc1:
-                if st.button("Simpan ke Histori", disabled=(state is not None or n_masuk_kandidat == 0), width="stretch"):
+                if st.button("Simpan ke Histori", width="stretch"):
                     with db.get_conn() as conn:
                         id_baru = db.simpan_pemindahan_dari_parsed(
                             conn, parsed, sumber="backfill_excel", file_asal=uploaded.name
@@ -161,9 +161,22 @@ with tab_cek:
                             format_sumber=parsed.format_sumber, tanggal_data=parsed.tanggal_awal,
                             n_baru=n_baru, n_duplikat=n_dup, konteks="pengecekan_harian",
                         )
-                    st.session_state.auto_capture_state[file_key] = {
-                        "ids": id_baru, "n_baru": n_baru, "n_dup": n_dup,
-                    }
+                    # Tombol ini SENGAJA selalu aktif (tidak ada syarat apa pun
+                    # untuk bisa diklik) -- kalau file sudah pernah disimpan
+                    # sebagian/semua, klik ulang aman: baris yang sudah ada
+                    # otomatis di-skip oleh insert_pemindahan_dari_parsed
+                    # (deteksi duplikat by cabang+sku+tanggal+qty), jadi
+                    # id_baru dari SETIAP klik di-akumulasi (bukan ditimpa)
+                    # supaya "Batal Simpan" tetap bisa membatalkan semuanya.
+                    existing = st.session_state.auto_capture_state.get(file_key)
+                    if existing:
+                        existing["ids"].extend(id_baru)
+                        existing["n_baru"] += n_baru
+                        existing["n_dup"] += n_dup
+                    else:
+                        st.session_state.auto_capture_state[file_key] = {
+                            "ids": id_baru, "n_baru": n_baru, "n_dup": n_dup,
+                        }
                     pending_notif = ("success", f"Tersimpan: {n_baru} record baru, {n_dup} sudah ada sebelumnya (di-skip).")
             with bc2:
                 if st.button("Batal Simpan", disabled=(state is None), width="stretch"):
