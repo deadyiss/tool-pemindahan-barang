@@ -14,28 +14,14 @@ from parser import parse_file
 st.set_page_config(page_title="Cek Pemindahan Barang", layout="wide")
 
 TANGGAL_MINIMAL = "2026-08-01"
-
-_BULAN_ID = {
-    1: "Januari", 2: "Februari", 3: "Maret", 4: "April", 5: "Mei", 6: "Juni",
-    7: "Juli", 8: "Agustus", 9: "September", 10: "Oktober", 11: "November", 12: "Desember",
-}
-
-
-def format_tanggal_id(tanggal_str: str) -> str:
-    """'2026-09-03' -> '3 September 2026'. Kalau formatnya tak terduga,
-    kembalikan apa adanya supaya tidak error di tampilan."""
-    try:
-        y, m, d = tanggal_str.split("-")
-        return f"{int(d)} {_BULAN_ID[int(m)]} {int(y)}"
-    except Exception:
-        return tanggal_str
-HALAMAN_SIZE = 50 
+HALAMAN_SIZE = 50  
 
 APP_USERNAME = os.environ.get("APP_USERNAME", "admin")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "ujangadmin")
 
 JENIS_OPSI = ["pkp", "nonpkp", "keduanya"]
 JENIS_LABEL = {"pkp": "PKP", "nonpkp": "Non-PKP", "keduanya": "Keduanya"}
+
 
 def require_login():
     if "authenticated" not in st.session_state:
@@ -62,10 +48,6 @@ def require_login():
 
 
 def render_tabel_hasil(rows: list[dict]):
-    """Tabel hasil cek harian -- st.dataframe biasa (tampilan native, konsisten
-    dengan tabel lain di app). Isi (SKU/Nama/Qty/Jenis/Valid/Alasan) tetap sama
-    seperti sebelumnya, cuma alasan sekarang jadi kolom biasa (bukan tooltip
-    hover) supaya tampilannya balik ke gaya dataframe standar."""
     df = pd.DataFrame([
         {
             "SKU": r["sku"],
@@ -81,10 +63,6 @@ def render_tabel_hasil(rows: list[dict]):
 
 
 def notif_dan_rerun(jenis: str, pesan: str, tahan_detik: float = 3.0):
-    """Tampilkan notifikasi (success/warning/error), TAHAN selama beberapa
-    detik supaya sempat kebaca, baru rerun. Streamlit sudah mengirim tampilan
-    notifikasi ke browser sebelum baris time.sleep() ini jalan -- jadi user
-    tetap melihatnya walau script di-'jeda' sesaat sebelum rerun."""
     getattr(st, jenis)(pesan)
     time.sleep(tahan_detik)
     st.rerun()
@@ -105,7 +83,6 @@ tab_cek, tab_pemindahan, tab_penjualan, tab_jenis, tab_backfill, tab_log = st.ta
         "Riwayat Import",
     ]
 )
-
 
 with tab_cek:
     st.subheader("Upload Excel penjualan cabang hari ini")
@@ -144,11 +121,9 @@ with tab_cek:
                 f"Status histori pemindahan: **{status_text}** dari file ini "
                 f"({n_masuk_kandidat} baris Receive/Masuk > 0 terdeteksi)."
             )
-
-            pending_notif = None
-            bc1, bc2 = st.columns(2)
+            bc1, bc2, _ = st.columns([1, 1, 3])
             with bc1:
-                if st.button("Simpan ke Histori", width="stretch"):
+                if st.button("Simpan ke Histori", disabled=(state is not None or n_masuk_kandidat == 0)):
                     with db.get_conn() as conn:
                         id_baru = db.simpan_pemindahan_dari_parsed(
                             conn, parsed, sumber="backfill_excel", file_asal=uploaded.name
@@ -160,26 +135,17 @@ with tab_cek:
                             format_sumber=parsed.format_sumber, tanggal_data=parsed.tanggal_awal,
                             n_baru=n_baru, n_duplikat=n_dup, konteks="pengecekan_harian",
                         )
-                    existing = st.session_state.auto_capture_state.get(file_key)
-                    if existing:
-                        existing["ids"].extend(id_baru)
-                        existing["n_baru"] += n_baru
-                        existing["n_dup"] += n_dup
-                    else:
-                        st.session_state.auto_capture_state[file_key] = {
-                            "ids": id_baru, "n_baru": n_baru, "n_dup": n_dup,
-                        }
-                    pending_notif = ("success", f"Tersimpan: {n_baru} record baru, {n_dup} sudah ada sebelumnya (di-skip).")
+                    st.session_state.auto_capture_state[file_key] = {
+                        "ids": id_baru, "n_baru": n_baru, "n_dup": n_dup,
+                    }
+                    notif_dan_rerun("success", f"Tersimpan: {n_baru} record baru, {n_dup} sudah ada sebelumnya (di-skip).")
             with bc2:
-                if st.button("Batal Simpan", disabled=(state is None), width="stretch"):
+                if st.button("Batal Simpan", disabled=(state is None)):
                     with db.get_conn() as conn:
                         db.delete_pemindahan_batch(conn, state["ids"])
                     n_terhapus = len(state["ids"])
                     del st.session_state.auto_capture_state[file_key]
-                    pending_notif = ("warning", f"{n_terhapus} record yang tadi tersimpan dari file ini sudah dihapus lagi.")
-
-            if pending_notif:
-                notif_dan_rerun(*pending_notif)
+                    notif_dan_rerun("warning", f"{n_terhapus} record yang tadi tersimpan dari file ini sudah dihapus lagi.")
 
             terjual_rows = [r for r in parsed.rows if r.qty_terjual > 0]
             if not terjual_rows:
@@ -189,8 +155,7 @@ with tab_cek:
                     hasil = []
                     for r in terjual_rows:
                         valid, alasan, jenis = db.cek_validitas_detail(
-                            conn, parsed.format_sumber, parsed.cabang, r.sku,
-                            TANGGAL_MINIMAL, parsed.tanggal_awal,
+                            conn, parsed.format_sumber, parsed.cabang, r.sku, TANGGAL_MINIMAL
                         )
                         hasil.append({
                             "sku": r.sku, "nama": r.nama_barang, "qty": r.qty_terjual,
@@ -209,11 +174,6 @@ with tab_cek:
                 c2.metric("Valid (boleh diinput)", n_valid)
                 c3.metric("Tidak valid", len(hasil) - n_valid)
 
-                st.caption(
-                    f"Rentang pengecekan: {format_tanggal_id(TANGGAL_MINIMAL)} -- "
-                    f"{format_tanggal_id(parsed.tanggal_awal)} (tanggal file ini). "
-                    f"Barang dianggap valid kalau ada pemindahan ke cabang ini di rentang tanggal tsb."
-                )
                 render_tabel_hasil(hasil)
 
                 df_download = pd.DataFrame([
@@ -246,35 +206,21 @@ with tab_cek:
         with cc3:
             qty_manual = st.number_input("Qty terjual", min_value=0.0, step=1.0, key="manual_cek_qty")
 
-        vcol1, vcol2 = st.columns(2)
-        with vcol1:
-            klik_cek = st.button("Cek Validitas (tanpa simpan)", key="manual_cek_button", width="stretch")
-        with vcol2:
-            klik_simpan = st.button("Cek & Simpan Penjualan", key="manual_simpan_button", width="stretch")
-
-        if klik_cek or klik_simpan:
+        if st.button("Cek Validitas", key="manual_cek_button"):
             sku_m, nama_m = barang_manual_opsi[barang_manual_pilih]
             with db.get_conn() as conn:
                 valid_m, alasan_m, jenis_m = db.cek_validitas_detail(
-                    conn, fmt_manual, cabang_manual, sku_m, TANGGAL_MINIMAL,
-                    str(pd.Timestamp.now().date()),
+                    conn, fmt_manual, cabang_manual, sku_m, TANGGAL_MINIMAL
                 )
-                if klik_simpan:
-                    db.simpan_penjualan(
-                        conn, format_sumber=fmt_manual, sku=sku_m, nama_barang=nama_m,
-                        cabang=cabang_manual, tanggal=str(pd.Timestamp.now().date()),
-                        qty_terjual=qty_manual, sumber="manual_cek", jenis_barang=jenis_m,
-                    )
+                db.simpan_penjualan(
+                    conn, format_sumber=fmt_manual, sku=sku_m, nama_barang=nama_m,
+                    cabang=cabang_manual, tanggal=str(pd.Timestamp.now().date()),
+                    qty_terjual=qty_manual, sumber="manual_cek", jenis_barang=jenis_m,
+                )
             if valid_m:
                 st.success(f"VALID -- {nama_m} ({jenis_m}). {alasan_m}")
             else:
                 st.error(f"TIDAK VALID -- {nama_m} ({jenis_m}). {alasan_m}")
-            st.caption(
-                f"Rentang pengecekan: {format_tanggal_id(TANGGAL_MINIMAL)} -- "
-                f"{format_tanggal_id(str(pd.Timestamp.now().date()))} (hari ini)."
-            )
-            if klik_simpan:
-                st.caption(f"Tersimpan ke penjualan hari ini ({pd.Timestamp.now().date()}), qty {qty_manual}.")
 
 with tab_pemindahan:
     st.subheader("Tambah record pemindahan barang")
@@ -348,13 +294,21 @@ with tab_pemindahan:
     st.divider()
     st.subheader("Data pemindahan tersimpan (edit/hapus — revisi nota)")
 
-    fc1, fc2 = st.columns([1, 2])
+    fc1, fc2, fc3 = st.columns([1, 1, 2])
     with fc1:
         filter_cabang = st.selectbox("Filter cabang", ["(semua)"] + daftar_cabang, key="filter_cabang") if daftar_cabang else "(semua)"
     with fc2:
+        if filter_cabang != "(semua)":
+            with db.get_conn() as conn:
+                tanggal_tersedia = [r[0] for r in db.list_tanggal_pemindahan(conn, filter_cabang)]
+            filter_tanggal = st.selectbox("Filter tanggal", ["(semua)"] + tanggal_tersedia, key="filter_tanggal_pemindahan")
+        else:
+            filter_tanggal = "(semua)"
+            st.selectbox("Filter tanggal", ["(pilih cabang dulu)"], disabled=True, key="filter_tanggal_disabled")
+    with fc3:
         search_term = st.text_input("Cari nama barang / SKU", key="search_pemindahan")
 
-    filter_key = f"{filter_cabang}|{search_term}"
+    filter_key = f"{filter_cabang}|{filter_tanggal}|{search_term}"
     if st.session_state.get("_last_filter_key") != filter_key:
         st.session_state["_last_filter_key"] = filter_key
         st.session_state["crud_page"] = 0
@@ -362,15 +316,16 @@ with tab_pemindahan:
         st.session_state["crud_page"] = 0
 
     cabang_arg = None if filter_cabang == "(semua)" else filter_cabang
+    tanggal_arg = None if filter_tanggal == "(semua)" else filter_tanggal
     search_arg = search_term.strip() or None
 
     with db.get_conn() as conn:
-        total_rows = db.count_pemindahan(conn, cabang=cabang_arg, search=search_arg)
+        total_rows = db.count_pemindahan(conn, cabang=cabang_arg, search=search_arg, tanggal=tanggal_arg)
     total_halaman = max(1, math.ceil(total_rows / HALAMAN_SIZE))
     st.session_state["crud_page"] = min(st.session_state["crud_page"], total_halaman - 1)
 
     with db.get_conn() as conn:
-        rows = db.list_pemindahan(conn, cabang=cabang_arg, search=search_arg,
+        rows = db.list_pemindahan(conn, cabang=cabang_arg, search=search_arg, tanggal=tanggal_arg,
                                     limit=HALAMAN_SIZE, offset=st.session_state["crud_page"] * HALAMAN_SIZE)
 
     if rows:
@@ -396,20 +351,17 @@ with tab_pemindahan:
             new_tanggal = st.date_input("Tanggal baru", key="edit_tanggal")
         with ec2:
             new_qty = st.number_input("Qty baru", min_value=0.0, step=1.0, key="edit_qty")
-        pending_notif_edit = None
-        colA, colB = st.columns(2)
+        colA, colB, _ = st.columns([1, 1, 5])
         with colA:
-            if st.button("Update", width="stretch"):
+            if st.button("Update"):
                 with db.get_conn() as conn:
                     db.update_pemindahan(conn, id_target, str(new_tanggal), new_qty)
-                pending_notif_edit = ("success", f"Record ID {id_target} diupdate.")
+                notif_dan_rerun("success", f"Record ID {id_target} diupdate.")
         with colB:
-            if st.button("Hapus", type="secondary", width="stretch"):
+            if st.button("Hapus", type="secondary"):
                 with db.get_conn() as conn:
                     db.delete_pemindahan(conn, id_target)
-                pending_notif_edit = ("success", f"Record ID {id_target} dihapus.")
-        if pending_notif_edit:
-            notif_dan_rerun(*pending_notif_edit)
+                notif_dan_rerun("success", f"Record ID {id_target} dihapus.")
     else:
         st.info("Tidak ada record yang cocok dengan filter/pencarian ini.")
 
@@ -496,20 +448,17 @@ with tab_penjualan:
             new_tanggal_pj = st.date_input("Tanggal baru", key="pj_edit_tanggal")
         with epc2:
             new_qty_pj = st.number_input("Qty baru", min_value=0.0, step=1.0, key="pj_edit_qty")
-        pending_notif_pj_edit = None
-        epcA, epcB = st.columns(2)
+        epcA, epcB, _ = st.columns([1, 1, 5])
         with epcA:
-            if st.button("Update", key="pj_update_btn", width="stretch"):
+            if st.button("Update", key="pj_update_btn"):
                 with db.get_conn() as conn:
                     db.update_penjualan(conn, id_target_pj, str(new_tanggal_pj), new_qty_pj)
-                pending_notif_pj_edit = ("success", f"Record penjualan ID {id_target_pj} diupdate.")
+                notif_dan_rerun("success", f"Record penjualan ID {id_target_pj} diupdate.")
         with epcB:
-            if st.button("Hapus", key="pj_hapus_btn", type="secondary", width="stretch"):
+            if st.button("Hapus", key="pj_hapus_btn", type="secondary"):
                 with db.get_conn() as conn:
                     db.delete_penjualan(conn, id_target_pj)
-                pending_notif_pj_edit = ("success", f"Record penjualan ID {id_target_pj} dihapus.")
-        if pending_notif_pj_edit:
-            notif_dan_rerun(*pending_notif_pj_edit)
+                notif_dan_rerun("success", f"Record penjualan ID {id_target_pj} dihapus.")
     else:
         st.info("Tidak ada histori penjualan yang cocok dengan filter ini.")
 
@@ -663,16 +612,14 @@ with tab_backfill:
                 items.append((uf.name, uf.getbuffer()))
         return items
 
-    bcol1, bcol2, bcol3 = st.columns(3)
+    bcol1, bcol2 = st.columns(2)
     with bcol1:
-        jalankan_penjualan = st.button("Simpan Penjualan", width="stretch")
+        jalankan_backfill = st.button("Jalankan Backfill (simpan pemindahan)")
     with bcol2:
-        jalankan_pemindahan = st.button("Simpan Barang Masuk / Pemindahan", width="stretch")
-    with bcol3:
-        jalankan_katalog = st.button("Simpan Semua Nama Barang", width="stretch")
-        st.caption("Catat SEMUA barang di file (tanpa syarat qty > 0) ke katalog -- lebih lambat, jalankan sesekali saja.")
+        jalankan_sync = st.button("Sinkronkan Katalog Lengkap (semua barang, lebih lambat)")
+        st.caption("Jalankan sesekali saja -- perlu supaya dropdown barang & klasifikasi PKP/Non lebih lengkap.")
 
-    if uploaded_files and (jalankan_penjualan or jalankan_pemindahan or jalankan_katalog):
+    if uploaded_files and (jalankan_backfill or jalankan_sync):
         xlsx_items = _expand_uploads(uploaded_files)
         if not xlsx_items:
             st.warning("Tidak ada file .xlsx ditemukan.")
@@ -690,7 +637,7 @@ with tab_backfill:
                         tmp_path = tmp.name
                     try:
                         parsed = parse_file(tmp_path)
-                        if jalankan_pemindahan:
+                        if jalankan_backfill:
                             n_kandidat = sum(1 for r in parsed.rows if r.qty_masuk > 0)
                             id_baru = db.simpan_pemindahan_dari_parsed(conn, parsed, sumber="backfill_excel", file_asal=nama_file)
                             n_baru = len(id_baru)
@@ -700,13 +647,7 @@ with tab_backfill:
                                            n_baru=n_baru, n_duplikat=n_dup, konteks="backfill_tab")
                             n_rows += n_baru
                             n_dup_total += n_dup
-                        elif jalankan_penjualan:
-                            n_baru_pj = db.simpan_penjualan_dari_parsed(conn, parsed, sumber="backfill_excel", file_asal=nama_file)
-                            db.log_import(conn, nama_file=nama_file, cabang=parsed.cabang,
-                                           format_sumber=parsed.format_sumber, tanggal_data=parsed.tanggal_awal,
-                                           n_baru=n_baru_pj, n_duplikat=0, konteks="backfill_tab_penjualan")
-                            n_rows += n_baru_pj
-                        else:  
+                        else:
                             n_rows += db.sinkronkan_katalog_lengkap(conn, parsed)
                         n_ok += 1
                     except Exception as e:
@@ -717,10 +658,8 @@ with tab_backfill:
                     progress.progress(i / len(xlsx_items))
                     status.text(f"{i}/{len(xlsx_items)} file diproses...")
 
-            if jalankan_pemindahan:
+            if jalankan_backfill:
                 st.success(f"Selesai. Sukses: {n_ok}, Gagal: {n_fail}. Record baru: {n_rows}, duplikat: {n_dup_total}")
-            elif jalankan_penjualan:
-                st.success(f"Selesai. Sukses: {n_ok}, Gagal: {n_fail}. Record penjualan tersimpan/diperbarui: {n_rows}")
             else:
                 st.success(f"Selesai. Sukses: {n_ok}, Gagal: {n_fail}. Baris katalog di-upsert: {n_rows}")
             if fail_log:
